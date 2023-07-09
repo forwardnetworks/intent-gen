@@ -34,7 +34,7 @@ forwardingOutcomes = {
         "description": "Traffic was delivered to destination IP’s discovered location(s).",
         "remedy": "None",
     },
-    "NOTDELIVERED": {
+    "NOT_DELIVERED": {
         "description": "No available paths found for query",
         "remedy": "This error may indicate that the source or destination address could not be found in the model. Check the source and destination address using Forward Enterprise search. The address may be incorrect or the address cannot be located.",
     },
@@ -44,7 +44,7 @@ forwardingOutcomes = {
     },
     "BLACKHOLE": {
         "description": "Traffic was implicitly dropped at the last hop, since the device had no matching rule. For example, if a router does not have a default route, traffic to any IP that is not in the routing table gets blackholed.",
-        "remedy": "This error should not typcally happen on a production network, it indicates that their is missing information for the device to forward traffic to another device. Leverage the queryURL to investigate using the Forward Enteprise platform to understand why there is no next-hop to forward traffic to.",
+        "remedy": "This error should not typically happen on a production network, it indicates that there is missing information for the device to forward traffic to another device. Leverage the queryURL to investigate using the Forward Enterprise platform to understand why there is no next-hop to forward traffic to.",
     },
     "DROPPED": {
         "description": "Traffic was explicitly dropped at the last hop, e.g. by a null route.",
@@ -52,7 +52,7 @@ forwardingOutcomes = {
     },
     "INADMISSIBLE": {
         "description": "Traffic was not admitted into the network. The first hop interface does not accept the traffic, e.g. incoming traffic had a vlan tag 10 while the ingress interface is an access interface that only permits traffic with vlan tag 20.",
-        "remedy": "This error may indicate an incorrect assumption about the where to origninate the source of the check.",
+        "remedy": "This error may indicate an incorrect assumption about the where to originate the source of the check.",
     },
     "UNREACHABLE": {
         "description": "ARP/NDP resolution failed along the path resulting in traffic not getting delivered to the intended destination.",
@@ -146,7 +146,7 @@ def check_info_paths(data):
         if not paths:
             paths = [
                 {
-                    "forwardingOutcome": "NOTDELIVERED",
+                    "forwardingOutcome": "NOT_DELIVERED",
                     "securityOutcome": "UNKNOWN",
                     "hops": [],
                 }
@@ -165,7 +165,7 @@ def check_info_paths(data):
         else:
             return_paths = [
                 {
-                    "forwardingOutcome": "NOTDELIVERED",
+                    "forwardingOutcome": "NOT_DELIVERED",
                     "securityOutcome": "UNKNOWN",
                     "hops": [],
                 }
