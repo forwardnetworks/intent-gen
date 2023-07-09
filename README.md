@@ -1,6 +1,11 @@
 # intent-gen
 
 
+```
+Usage:
+  fwd-intent-gen.py <appserver> <input> <snapshot>
+```
+
 
 Discalimer:
 
