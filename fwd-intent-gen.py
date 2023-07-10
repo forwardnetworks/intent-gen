@@ -142,6 +142,9 @@ def check_info_paths(data):
     for element in data:
         info = element.get("info", {})
         paths = info.get("paths", [])
+        element["pathCount"] = len(paths)
+        print(f"-> {len(paths)} -> {paths}")
+
 
         if not paths:
             paths = [
@@ -152,7 +155,7 @@ def check_info_paths(data):
                 }
             ]
 
-        element["pathCount"] = len(paths)
+   
         element["forwardHops"] = len(paths[0].get("hops", []))
         element["info"] = {"paths": paths}
 
