@@ -162,7 +162,7 @@ def check_info_paths(data):
         if return_paths:
             element["returnHops"] = len(return_paths[0].get("hops", []))
             element["returnPathCount"] = len(return_paths)
-            print(f'-> {element["returnHops"]} -> {return_paths}')
+            # print(f'-> {element["returnHops"]} -> {return_paths}')
 
         else:
             element["returnPathCount"] = len(return_paths)
@@ -174,7 +174,7 @@ def check_info_paths(data):
                     "hops": [],
                 }
             ]
-
+        # print(f'{element["returnHops"]} -> {return_paths}')
         element["returnPathInfo"] = {"paths": return_paths}
 
     return data
@@ -251,10 +251,10 @@ async def process_input(appserver, snapshot, obj):
                     fix_data,
                     record_path=["info", "paths"],
                     meta=[
-                        "forwardHops",
-                        "returnHops",
                         "pathCount",
+                        "forwardHops",
                         "returnPathCount",
+                        "returnHops",
                         "queryUrl",
                     ],
                     # errors="ignore",
@@ -269,10 +269,26 @@ async def process_input(appserver, snapshot, obj):
 
 
 def main(appserver, snapshot, data):
-    loop = asyncio.get_event_loop()
-    result = loop.run_until_complete(process_input(appserver, snapshot, data))
+    result = asyncio.run(process_input(appserver, snapshot, data))
     updatedf = addForwardingOutcomes(result)
-    print(updatedf)
+    print(
+        updatedf[
+            [
+                "region",
+                "application",
+                "srcIp",
+                "dstIp",
+                "ipProto",
+                "dstPort",
+                "forwardingOutcome",
+                "securityOutcome",
+                "pathCount",
+                "forwardHops",
+                "returnPathCount",
+                "returnHops",
+            ]
+        ]
+    )
     updatedf.to_excel("intent-gen.xlsx", index=True)
     update_font("intent-gen.xlsx")
 
