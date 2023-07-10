@@ -205,8 +205,8 @@ async def process_input(appserver, snapshot, obj):
     async with aiohttp.ClientSession() as session:
         dfs = []  # List to store individual dataframes
         for region, data in obj.items():
-            queries = []
             for application, app in data.items():
+                queries = []
                 sources = app.get("source", [])
                 destinations = app.get("destination", [])
                 ipProto = app.get("ipProto", [])
