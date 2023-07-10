@@ -143,8 +143,6 @@ def check_info_paths(data):
         info = element.get("info", {})
         paths = info.get("paths", [])
         element["pathCount"] = len(paths)
-        print(f"-> {len(paths)} -> {paths}")
-
 
         if not paths:
             paths = [
@@ -155,7 +153,6 @@ def check_info_paths(data):
                 }
             ]
 
-   
         element["forwardHops"] = len(paths[0].get("hops", []))
         element["info"] = {"paths": paths}
 
@@ -165,7 +162,11 @@ def check_info_paths(data):
         if return_paths:
             element["returnHops"] = len(return_paths[0].get("hops", []))
             element["returnPathCount"] = len(return_paths)
+            print(f'-> {element["returnHops"]} -> {return_paths}')
+
         else:
+            element["returnPathCount"] = len(return_paths)
+            element["returnHops"] = 0
             return_paths = [
                 {
                     "forwardingOutcome": "NOT_DELIVERED",
@@ -174,8 +175,6 @@ def check_info_paths(data):
                 }
             ]
 
-        element["returnPathCount"] = len(paths)
-        element["returnHops"] = len(paths[0].get("hops", []))
         element["returnPathInfo"] = {"paths": return_paths}
 
     return data
