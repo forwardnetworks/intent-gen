@@ -78,6 +78,23 @@ securityOutcomes = {
     },
 }
 
+def return_firstlast_hop(df):
+    df = df.copy()
+    for index, row in df.iterrows():
+        if len(row['hops']) > 0:
+            firsthop = row['hops'][0]
+            lasthop = row['hops'][-1]
+            first_hop_device_name = firsthop['deviceName']
+            first_hop_deviceType = firsthop['deviceType']
+            last_hop_device_name = lasthop['deviceName']
+            last_hop_deviceType = lasthop['deviceType']
+            # df.at[index, 'firstHop'] = firsthop
+            # df.at[index, 'lastHop'] = lasthop
+            df.at[index, 'firstHopDevice'] = first_hop_device_name
+            df.at[index, 'firstHopDeviceType'] = first_hop_deviceType
+            df.at[index, 'lastHopDevice'] = last_hop_device_name
+            df.at[index, 'lastHopDeviceType'] = last_hop_deviceType
+    return remove_columns(df, ['hops'])
 
 def addForwardingOutcomes(df):
     df["forwardDescription"] = ""
@@ -120,10 +137,11 @@ def addForwardingOutcomes(df):
             "securityDescription",
             "securityRemedy",
             "queryUrl",
+            "hops"
         ]
     ]
 
-
+           
 def remove_columns(df, columns):
     return df.drop(columns, axis=1)
 
@@ -262,17 +280,20 @@ async def process_input(appserver, snapshot, obj):
                 merged_df = pd.merge(
                     r, query_list_df, left_index=True, right_index=True
                 )
-                newdf = remove_columns(merged_df, ["hops"])
+                # newdf = remove_columns(merged_df, ["hops"])
 
-                dfs.append(newdf)
+                dfs.append(merged_df)
         return pd.concat(dfs, ignore_index=True)
 
 
 def main(appserver, snapshot, data):
+    report = f"intent-gen-{snapshot}.xlsx"
     result = asyncio.run(process_input(appserver, snapshot, data))
-    updatedf = addForwardingOutcomes(result)
+    updatedf = return_firstlast_hop(addForwardingOutcomes(result))
+    pd.set_option('display.max_rows', None)  # Show all rows
     print(
-        updatedf[
+        updatedf
+        [
             [
                 "region",
                 "application",
@@ -286,11 +307,16 @@ def main(appserver, snapshot, data):
                 "forwardHops",
                 "returnPathCount",
                 "returnHops",
+                "firstHopDevice",
+                "firstHopDeviceType",
+                "lastHopDevice",
+                "lastHopDeviceType"
+                
             ]
         ]
     )
-    updatedf.to_excel("intent-gen.xlsx", index=True)
-    update_font("intent-gen.xlsx")
+    updatedf.to_excel(report, index=True)
+    update_font(report)
 
 
 if __name__ == "__main__":
