@@ -78,23 +78,25 @@ securityOutcomes = {
     },
 }
 
+
 def return_firstlast_hop(df):
     df = df.copy()
     for index, row in df.iterrows():
-        if len(row['hops']) > 0:
-            firsthop = row['hops'][0]
-            lasthop = row['hops'][-1]
-            first_hop_device_name = firsthop['deviceName']
-            first_hop_deviceType = firsthop['deviceType']
-            last_hop_device_name = lasthop['deviceName']
-            last_hop_deviceType = lasthop['deviceType']
+        if len(row["hops"]) > 0:
+            firsthop = row["hops"][0]
+            lasthop = row["hops"][-1]
+            first_hop_device_name = firsthop["deviceName"]
+            first_hop_deviceType = firsthop["deviceType"]
+            last_hop_device_name = lasthop["deviceName"]
+            last_hop_deviceType = lasthop["deviceType"]
             # df.at[index, 'firstHop'] = firsthop
             # df.at[index, 'lastHop'] = lasthop
-            df.at[index, 'firstHopDevice'] = first_hop_device_name
-            df.at[index, 'firstHopDeviceType'] = first_hop_deviceType
-            df.at[index, 'lastHopDevice'] = last_hop_device_name
-            df.at[index, 'lastHopDeviceType'] = last_hop_deviceType
-    return remove_columns(df, ['hops'])
+            df.at[index, "firstHopDevice"] = first_hop_device_name
+            df.at[index, "firstHopDeviceType"] = first_hop_deviceType
+            df.at[index, "lastHopDevice"] = last_hop_device_name
+            df.at[index, "lastHopDeviceType"] = last_hop_deviceType
+    return remove_columns(df, ["hops"])
+
 
 def addForwardingOutcomes(df):
     df["forwardDescription"] = ""
@@ -118,30 +120,33 @@ def addForwardingOutcomes(df):
             remedy = securityOutcomes[security_outcome]["remedy"]
             df.at[index, "securityDescription"] = description
             df.at[index, "securityRemedy"] = remedy
-    return df[
-        [
-            "region",
-            "application",
-            "srcIp",
-            "dstIp",
-            "ipProto",
-            "dstPort",
-            "forwardingOutcome",
-            "securityOutcome",
-            "pathCount",
-            "forwardHops",
-            "returnPathCount",
-            "returnHops",
-            "forwardDescription",
-            "forwardRemedy",
-            "securityDescription",
-            "securityRemedy",
-            "queryUrl",
-            "hops"
-        ]
-    ]
+    return df
 
-           
+
+# [
+#         [
+#             "region",
+#             "application",
+#             "srcIp",
+#             "dstIp",
+#             "ipProto",
+#             "dstPort",
+#             "forwardingOutcome",
+#             "securityOutcome",
+#             "pathCount",
+#             "forwardHops",
+#             "returnPathCount",
+#             "returnHops",
+#             "forwardDescription",
+#             "forwardRemedy",
+#             "securityDescription",
+#             "securityRemedy",
+#             "queryUrl",
+#             "hops",
+#         ]
+#     ]
+
+
 def remove_columns(df, columns):
     return df.drop(columns, axis=1)
 
@@ -161,6 +166,8 @@ def check_info_paths(data):
         info = element.get("info", {})
         paths = info.get("paths", [])
         element["pathCount"] = len(paths)
+        srcIpLocationType = element.get("srcIpLocationType", "UNKNOWN")
+        dstIpLocationType = element.get("dstIpLocationType", "UNKNOWN")
 
         if not paths:
             paths = [
@@ -173,6 +180,8 @@ def check_info_paths(data):
 
         element["forwardHops"] = len(paths[0].get("hops", []))
         element["info"] = {"paths": paths}
+        element["srcIpLocationType"] = srcIpLocationType
+        element["dstIpLocationType"] = dstIpLocationType
 
         return_path_info = element.get("returnPathInfo", {})
         return_paths = return_path_info.get("paths", [])
@@ -249,6 +258,7 @@ async def process_input(appserver, snapshot, obj):
                 query_list_df["application"] = application
                 body = {"queries": queries, **options}
                 url = f"https://{appserver}/api/snapshots/{snapshot}/pathsBulkSeq"
+                #  chunk these at a few 100..
                 response_text, response_status = await fetch(session, url, body)
 
                 parsed_data = []
@@ -269,6 +279,8 @@ async def process_input(appserver, snapshot, obj):
                     fix_data,
                     record_path=["info", "paths"],
                     meta=[
+                        "dstIpLocationType",
+                        "srcIpLocationType",
                         "pathCount",
                         "forwardHops",
                         "returnPathCount",
@@ -289,11 +301,11 @@ async def process_input(appserver, snapshot, obj):
 def main(appserver, snapshot, data):
     report = f"intent-gen-{snapshot}.xlsx"
     result = asyncio.run(process_input(appserver, snapshot, data))
+    fo = addForwardingOutcomes(result)
     updatedf = return_firstlast_hop(addForwardingOutcomes(result))
-    pd.set_option('display.max_rows', None)  # Show all rows
+    pd.set_option("display.max_rows", None)  # Show all rows
     print(
-        updatedf
-        [
+        updatedf[
             [
                 "region",
                 "application",
@@ -303,6 +315,8 @@ def main(appserver, snapshot, data):
                 "dstPort",
                 "forwardingOutcome",
                 "securityOutcome",
+                "srcIpLocationType",
+                "dstIpLocationType",
                 "pathCount",
                 "forwardHops",
                 "returnPathCount",
@@ -310,8 +324,7 @@ def main(appserver, snapshot, data):
                 "firstHopDevice",
                 "firstHopDeviceType",
                 "lastHopDevice",
-                "lastHopDeviceType"
-                
+                "lastHopDeviceType",
             ]
         ]
     )
