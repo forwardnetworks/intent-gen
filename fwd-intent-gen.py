@@ -136,8 +136,6 @@ def return_firstlast_hop(df):
             first_hop_deviceType = firsthop["deviceType"]
             last_hop_device_name = lasthop["deviceName"]
             last_hop_deviceType = lasthop["deviceType"]
-            # df.at[index, 'firstHop'] = firsthop
-            # df.at[index, 'lastHop'] = lasthop
             df.at[index, "firstHopDevice"] = first_hop_device_name
             df.at[index, "firstHopDeviceType"] = first_hop_deviceType
             df.at[index, "lastHopDevice"] = last_hop_device_name
@@ -390,25 +388,6 @@ async def process_input(appserver, snapshot, input, address_df):
                         & (address_df["status"] == "VALID")
                     ).any()
                 ]
-
-                # invalid_addresses = set()
-                # for source in sources:
-                #     for destination in destinations:
-                #         if (address_df["address"] == source).any() or (
-                #             address_df["address"] == destination
-                #         ).any():
-                #             record = address_df.loc[
-                #                 (address_df["address"] == source)
-                #                 | (address_df["address"] == destination),
-                #                 ["address", "status", "origin", "description"],
-                #             ]
-                #             if record["status"].values[0] != "VALID":
-                #                 error_message = f"Error occurred. Address: {record['address'].values[0]}, Status: {record['status'].values[0]}, Description: {record['description'].values[0]}"
-                #                 invalid_addresses.add(record['address'].values[0])
-
-                # error_df = address_df[address_df['address'].isin(invalid_addresses)]
-                # for _, row in error_df.iterrows():
-                #   print(f"Error occurred. Address: {row['address']}, Origin: {row['origin']} Status: {row['status']}, Description: {row['description']}")
 
                 query_list_df = pd.DataFrame(filtered_queries)
                 print()
