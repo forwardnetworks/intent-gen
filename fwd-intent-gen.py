@@ -443,8 +443,6 @@ async def process_input(appserver, snapshot, input, address_df):
     return pd.concat(dfs, ignore_index=True)
 
 
-
-
 def search_address(input):
     addresses = set()
     for region, region_value in input.items():
@@ -527,8 +525,34 @@ def main():
                 ]
             ]
         )
-        # updatedf.to_excel(report, index=True)
-        # update_font(report)
+        updatedf[
+            [
+                "region",
+                "application",
+                "srcIp",
+                "dstIp",
+                "ipProto",
+                "dstPort",
+                "forwardingOutcome",
+                "securityOutcome",
+                "srcIpLocationType",
+                "dstIpLocationType",
+                "pathCount",
+                "forwardHops",
+                "returnPathCount",
+                "returnHops",
+                "firstHopDevice",
+                "firstHopDeviceType",
+                "lastHopDevice",
+                "lastHopDeviceType",
+                "queryUrl",
+                "forwardDescription",
+                "forwardRemedy",
+                "securityDescription",
+                "securityRemedy",
+            ]
+        ].to_excel(report, index=True)
+        update_font(report)
 
     elif arguments["check"]:
         print("Running Check")
