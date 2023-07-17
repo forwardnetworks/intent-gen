@@ -3,7 +3,12 @@
 
 ```
 Usage:
-  fwd-intent-gen.py <appserver> <input> <snapshot>
+  fwd-intent-gen.py run <appserver> <input> <snapshot>
+  fwd-intent-gen.py check <appserver> <input> <snapshot>
+
+Options:
+  -h --help     Show this help message
+
 ```
 
 
