@@ -494,7 +494,7 @@ def main():
         with open(infile) as file:
             data = json.load(file)
         report = f"intent-gen-{snapshot}.xlsx"
-        pd.set_option("display.max_rows", None)  # Show all rows
+        #pd.set_option("display.max_rows", None)  # Show all rows
         addresses = search_address(data)
         address_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
         error_queries(data, address_df)
