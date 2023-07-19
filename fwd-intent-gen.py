@@ -500,7 +500,7 @@ def main():
         snapshot = arguments["<snapshot>"]
         batchsize = int(arguments['--batch'])
 
-        print(f"Seting batch size: {batchsize}")
+        print(f"Setting batch size: {batchsize}")
 
         with open(infile) as file:
             data = json.load(file)
