@@ -128,19 +128,25 @@ securityOutcomes = {
 
 
 def return_firstlast_hop(df):
-    df = df.copy()
     for index, row in df.iterrows():
-        if len(row["hops"]) > 0:
-            firsthop = row["hops"][0]
-            lasthop = row["hops"][-1]
-            first_hop_device_name = firsthop["deviceName"]
-            first_hop_deviceType = firsthop["deviceType"]
-            last_hop_device_name = lasthop["deviceName"]
-            last_hop_deviceType = lasthop["deviceType"]
-            df.at[index, "firstHopDevice"] = first_hop_device_name
-            df.at[index, "firstHopDeviceType"] = first_hop_deviceType
-            df.at[index, "lastHopDevice"] = last_hop_device_name
-            df.at[index, "lastHopDeviceType"] = last_hop_deviceType
+            hops = row["hops"]
+            if len(hops) > 0:
+                firsthop = hops[0]
+                lasthop = hops[-1]
+                first_hop_device_name = firsthop.get("deviceName")
+                first_hop_deviceType = firsthop.get("deviceType")
+                last_hop_device_name = lasthop.get("deviceName")
+                last_hop_deviceType = lasthop.get("deviceType")
+                df.at[index, "firstHopDevice"] = first_hop_device_name
+                df.at[index, "firstHopDeviceType"] = first_hop_deviceType
+                df.at[index, "lastHopDevice"] = last_hop_device_name
+                df.at[index, "lastHopDeviceType"] = last_hop_deviceType
+                df.at[index, "lastHopEgressIntf"] = lasthop.get("egressInterface")
+                if "egressInterface" in lasthop:
+                    df.at[index, "lastHopEgressIntf"] = lasthop["egressInterface"]
+                else:
+                    df.at[index, "lastHopEgressIntf"] = None
+
     return remove_columns_df(df, ["hops"])
 
 
@@ -427,6 +433,7 @@ async def process_input(appserver, snapshot, input, address_df, batch_size):
                         parsed_data.extend(json.loads(line) for line in lines if line)
                         # Cleanup for dataframe import
                         fix_data = check_info_paths(parsed_data)
+                        # print(f"debug {fix_data}")
 
                         r = pd.json_normalize(
                             fix_data,
@@ -508,7 +515,6 @@ def main():
         #pd.set_option("display.max_rows", None)  # Show all rows
         addresses = search_address(data)
         address_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
-        error_queries(data, address_df)
         intent = asyncio.run(process_input(appserver, snapshot, data, address_df, batchsize))
         forwarding_outcomes = addForwardingOutcomes(intent)
         updatedf = return_firstlast_hop(forwarding_outcomes)
@@ -532,6 +538,7 @@ def main():
                     "firstHopDevice",
                     # "firstHopDeviceType",
                     "lastHopDevice",
+                    "lastHopEgressIntf"
                     # "lastHopDeviceType",
                 ]
             ]
@@ -556,6 +563,7 @@ def main():
                 "firstHopDeviceType",
                 "lastHopDevice",
                 "lastHopDeviceType",
+                "lastHopEgressIntf",
                 "queryUrl",
                 "forwardDescription",
                 "forwardRemedy",
