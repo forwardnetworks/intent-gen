@@ -1,13 +1,14 @@
 """
 Usage:
-  fwd-intent-gen.py run <appserver> <input> <snapshot>
+  fwd-intent-gen.py run <appserver> <input> <snapshot> [--batch=<batch_size>]
   fwd-intent-gen.py check <appserver> <input> <snapshot>
 
 Options:
   -h --help     Show this help message
-
+  --batch=<batch_size>  Configure batch size [default: 300]
 """
 
+import math
 import sys
 import pandas as pd
 import argparse
@@ -356,7 +357,7 @@ def error_queries(input, address_df):
             print()
 
 
-async def process_input(appserver, snapshot, input, address_df):
+async def process_input(appserver, snapshot, input, address_df, batch_size):
     async with aiohttp.ClientSession() as session:
         dfs = []  # List to store individual dataframes
         for region, data in input.items():
@@ -393,52 +394,58 @@ async def process_input(appserver, snapshot, input, address_df):
                 print()
                 query_list_df["region"] = region
                 query_list_df["application"] = application
+                total_queries = len(filtered_queries)
 
-                if len(filtered_queries) > 0:
-                    body = {"queries": filtered_queries, **options}
-                    url = f"https://{appserver}/api/snapshots/{snapshot}/pathsBulkSeq"
-                    #  chunk these at a few 100..
-                    response_text, response_status = await fetch(
-                        session,
-                        url,
-                        body,
-                        method="POST",
-                        username=username,
-                        password=password,
-                        headers=headers_seq,
-                    )
-                    parsed_data = []
-                    # Check if the request was successful.
-                    if response_status != 200:
-                        raise aiohttp.ClientResponseError(
-                            request_info=None,
-                            history=None,
-                            status=response_status,
-                            message="Request failed",
+                if total_queries > 0:
+                    num_batches = math.ceil(total_queries / batch_size)
+                    for i in range(num_batches):
+                        start_index = i * batch_size
+                        end_index = min((i + 1) * batch_size, total_queries)
+                        batch_queries = filtered_queries[start_index:end_index]
+                        body = {"queries": batch_queries, **options}
+                        
+                        url = f"https://{appserver}/api/snapshots/{snapshot}/pathsBulkSeq"
+                        response_text, response_status = await fetch(
+                            session,
+                            url,
+                            body,
+                            method="POST",
+                            username=username,
+                            password=password,
+                            headers=headers_seq,
                         )
-                    lines = response_text.decode().split("\x1E")
-                    parsed_data.extend(json.loads(line) for line in lines if line)
-                    # Cleanup for dataframe import
-                    fix_data = check_info_paths(parsed_data)
+                        parsed_data = []
+                        # Check if the request was successful.
+                        if response_status != 200:
+                            raise aiohttp.ClientResponseError(
+                                request_info=None,
+                                history=None,
+                                status=response_status,
+                                message="Request failed",
+                            )
+                        lines = response_text.decode().split("\x1E")
+                        parsed_data.extend(json.loads(line) for line in lines if line)
+                        # Cleanup for dataframe import
+                        fix_data = check_info_paths(parsed_data)
 
-                    r = pd.json_normalize(
-                        fix_data,
-                        record_path=["info", "paths"],
-                        meta=[
-                            "dstIpLocationType",
-                            "srcIpLocationType",
-                            "pathCount",
-                            "forwardHops",
-                            "returnPathCount",
-                            "returnHops",
-                            "queryUrl",
-                        ],
-                        # errors="ignore",
-                    )
-                    merged_df = pd.merge(
-                        r, query_list_df, left_index=True, right_index=True
-                    )
-                    dfs.append(merged_df)
+                        r = pd.json_normalize(
+                            fix_data,
+                            record_path=["info", "paths"],
+                            meta=[
+                                "dstIpLocationType",
+                                "srcIpLocationType",
+                                "pathCount",
+                                "forwardHops",
+                                "returnPathCount",
+                                "returnHops",
+                                "queryUrl",
+                            ],
+                            # errors="ignore",
+                        )
+                        merged_df = pd.merge(
+                            r, query_list_df, left_index=True, right_index=True
+                        )
+                        dfs.append(merged_df)
 
     return pd.concat(dfs, ignore_index=True)
 
@@ -491,6 +498,10 @@ def main():
         infile = arguments["<input>"]
         appserver = arguments["<appserver>"]
         snapshot = arguments["<snapshot>"]
+        batchsize = int(arguments['--batch'])
+
+        print(f"Seting batch size: {batchsize}")
+
         with open(infile) as file:
             data = json.load(file)
         report = f"intent-gen-{snapshot}.xlsx"
@@ -498,7 +509,7 @@ def main():
         addresses = search_address(data)
         address_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
         error_queries(data, address_df)
-        intent = asyncio.run(process_input(appserver, snapshot, data, address_df))
+        intent = asyncio.run(process_input(appserver, snapshot, data, address_df, batchsize))
         forwarding_outcomes = addForwardingOutcomes(intent)
         updatedf = return_firstlast_hop(forwarding_outcomes)
         print(
