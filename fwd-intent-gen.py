@@ -1,14 +1,16 @@
 """
 Usage:
-  fwd-intent-gen.py run <appserver> <input> <snapshot> [--batch=<batch_size>]
-  fwd-intent-gen.py check <appserver> <input> <snapshot>
+  fwd-intent-gen.py run <appserver> <input> <snapshot> <queryId> [--batch=<batch_size>]
+  fwd-intent-gen.py check <appserver> <input> <snapshot> [--csv]
 
 Options:
-  -h --help     Show this help message
+  -h --help             Show this help message
   --batch=<batch_size>  Configure batch size [default: 300]
+  --csv                 "Dump into CSV file for import"
 """
 
 import math
+import socket
 import sys
 import pandas as pd
 import argparse
@@ -47,6 +49,16 @@ def remove_columns(data, columns_to_remove):
         new_data.append(new_item)
     return new_data
 
+
+def resolve_ip_to_domain(ip_address):
+    try:
+        domain_name = socket.gethostbyaddr(ip_address)[0]
+        return domain_name
+    except socket.herror as e:
+        return ip_address
+
+
+#
 
 options = {
     "intent": "PREFER_DELIVERED",
@@ -129,24 +141,24 @@ securityOutcomes = {
 
 def return_firstlast_hop(df):
     for index, row in df.iterrows():
-            hops = row["hops"]
-            if len(hops) > 0:
-                firsthop = hops[0]
-                lasthop = hops[-1]
-                first_hop_device_name = firsthop.get("deviceName")
-                first_hop_deviceType = firsthop.get("deviceType")
-                last_hop_device_name = lasthop.get("deviceName")
-                last_hop_deviceType = lasthop.get("deviceType")
-                df.at[index, "firstHopDevice"] = first_hop_device_name
-                df.at[index, "firstHopDeviceType"] = first_hop_deviceType
-                df.at[index, "lastHopDevice"] = last_hop_device_name
-                df.at[index, "lastHopDeviceType"] = last_hop_deviceType
-                df.at[index, "lastHopEgressIntf"] = lasthop.get("egressInterface")
-                if "egressInterface" in lasthop:
-                    df.at[index, "lastHopEgressIntf"] = lasthop["egressInterface"]
-                else:
-                    df.at[index, "lastHopEgressIntf"] = None
+        hops = row["hops"]
+        if len(hops) > 0:
+            firsthop = hops[0]
+            lasthop = hops[-1]
+            first_hop_device_name = firsthop.get("deviceName")
+            first_hop_deviceType = firsthop.get("deviceType")
+            last_hop_device_name = lasthop.get("deviceName")
+            last_hop_deviceType = lasthop.get("deviceType")
+            df.at[index, "firstHopDevice"] = first_hop_device_name
+            df.at[index, "firstHopDeviceType"] = first_hop_deviceType
+            df.at[index, "lastHopDevice"] = last_hop_device_name
+            df.at[index, "lastHopDeviceType"] = last_hop_deviceType
+            df.at[index, "lastHopEgressIntf"] = lasthop.get("egressInterface")
+            if "egressInterface" in lasthop:
+                df.at[index, "lastHopEgressIntf"] = lasthop["egressInterface"]
 
+            else:
+                df.at[index, "lastHopEgressIntf"] = None
     return remove_columns_df(df, ["hops"])
 
 
@@ -353,14 +365,19 @@ def error_queries(input, address_df):
                             error_message = f"Error occurred. Address: {record['address'].values[0]}, Status: {record['status'].values[0]}, Description: {record['description'].values[0]}"
                             invalid_addresses.add(record["address"].values[0])
 
-            error_df = address_df[address_df["address"].isin(invalid_addresses)]
+            error_df = address_df[address_df["address"].isin(invalid_addresses)].copy()
 
             print(f"\nErrors:\n{region}\n{application}\n")
-            for _, row in error_df.iterrows():
+            for index, row in error_df.iterrows():
+                address = row["address"]
+                hostname = resolve_ip_to_domain(address)
+                error_df.loc[index, "hostname"] = hostname
                 print(
-                    f"Error occurred. Address: {row['address']}, Origin: {row['origin']} Status: {row['status']}, Description: {row['description']}"
+                    f"Error occurred. Address: {row['address']}, Name: {hostname}, Origin: {row['origin']} Status: {row['status']}, Description: {row['description']}"
                 )
+
             print()
+            return error_df
 
 
 async def process_input(appserver, snapshot, input, address_df, batch_size):
@@ -409,8 +426,10 @@ async def process_input(appserver, snapshot, input, address_df, batch_size):
                         end_index = min((i + 1) * batch_size, total_queries)
                         batch_queries = filtered_queries[start_index:end_index]
                         body = {"queries": batch_queries, **options}
-                        
-                        url = f"https://{appserver}/api/snapshots/{snapshot}/pathsBulkSeq"
+
+                        url = (
+                            f"https://{appserver}/api/snapshots/{snapshot}/pathsBulkSeq"
+                        )
                         response_text, response_status = await fetch(
                             session,
                             url,
@@ -473,6 +492,34 @@ def search_address(input):
     return addresses
 
 
+async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
+    async with aiohttp.ClientSession() as session:
+        url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
+        body = {
+            "queryId": queryId,
+            "queryOptions": {
+                "columnFilters": [
+                    {"columnName": "deviceName", "value": device},
+                    {"columnName": "Interface", "value": port},
+                ],
+            },
+        }
+        response_text, response_status = await fetch(
+            session,
+            url,
+            body,
+            method="POST",
+            username=username,
+            password=password,
+            headers=headers,
+        )
+        if response_status == 200:
+            response_json = json.loads(response_text)
+        else:
+            raise Exception(f"Error: {response_status} {response_text}")
+    return response_json["items"][0]
+
+
 async def search_subnet(appserver, snapshot, addresses):
     result_list = []  # List to store the response JSON for each address
 
@@ -505,19 +552,44 @@ def main():
         infile = arguments["<input>"]
         appserver = arguments["<appserver>"]
         snapshot = arguments["<snapshot>"]
-        batchsize = int(arguments['--batch'])
-
+        queryId = arguments["<queryId>"]
+        batchsize = int(arguments["--batch"])
         print(f"Setting batch size: {batchsize}")
-
         with open(infile) as file:
             data = json.load(file)
         report = f"intent-gen-{snapshot}.xlsx"
-        #pd.set_option("display.max_rows", None)  # Show all rows
+        pd.set_option("display.max_rows", None)  # Show all rows
         addresses = search_address(data)
         address_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
-        intent = asyncio.run(process_input(appserver, snapshot, data, address_df, batchsize))
+        intent = asyncio.run(
+            process_input(appserver, snapshot, data, address_df, batchsize)
+        )
         forwarding_outcomes = addForwardingOutcomes(intent)
         updatedf = return_firstlast_hop(forwarding_outcomes)
+        for index, row in updatedf.iterrows():
+            device = row["lastHopDevice"]
+            interface = row["lastHopEgressIntf"]
+            forwardingOutcome = row["forwardingOutcome"]
+            outcomes = ["DELIVERED", "NOT_DELIVERED"]
+            if (
+                device
+                and forwardingOutcome
+                and interface
+                and forwardingOutcome not in outcomes
+            ):
+                hosts = asyncio.run(
+                    nqe_get_hosts_by_port(
+                        queryId,
+                        appserver,
+                        snapshot,
+                        device,
+                        interface,
+                    )
+                )
+                updatedf.loc[index, "hostAddress"] = hosts["Address"]
+                updatedf.loc[index, "MacAddress"] = hosts["MacAddress"]
+                updatedf.loc[index, "OUI"] = hosts["OUI"]
+                updatedf.loc[index, "hostInterface"] = hosts["Interface"]
         print(
             updatedf[
                 [
@@ -538,8 +610,12 @@ def main():
                     "firstHopDevice",
                     # "firstHopDeviceType",
                     "lastHopDevice",
-                    "lastHopEgressIntf"
+                    "lastHopEgressIntf",
                     # "lastHopDeviceType",
+                    "hostAddress",
+                    "MacAddress",
+                    "OUI",
+                    "hostInterface",
                 ]
             ]
         )
@@ -564,11 +640,15 @@ def main():
                 "lastHopDevice",
                 "lastHopDeviceType",
                 "lastHopEgressIntf",
+                "hostAddress",
+                "MacAddress",
+                "OUI",
+                "hostInterface",
                 "queryUrl",
                 "forwardDescription",
                 "forwardRemedy",
                 "securityDescription",
-                "securityRemedy",
+                "securityRemedy"
             ]
         ].to_excel(report, index=True)
         update_font(report)
@@ -578,11 +658,14 @@ def main():
         infile = arguments["<input>"]
         appserver = arguments["<appserver>"]
         snapshot = arguments["<snapshot>"]
+        report = f"errored-devices-{snapshot}.csv"
         with open(infile) as file:
             data = json.load(file)
         addresses = search_address(data)
         address_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
-        error_queries(data, address_df)
+        errored_devices = error_queries(data, address_df)
+        if arguments["--csv"]:
+            errored_devices.loc[:, ["address", "hostname"]].to_csv(report, index=False)
 
     else:
         print(
