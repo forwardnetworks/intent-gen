@@ -2,3 +2,4 @@ pandas
 aiohttp
 docopt
 openpyxl
+requests

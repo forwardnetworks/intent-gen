@@ -1,12 +1,13 @@
 """
 Usage:
-  fwd-intent-gen.py run <appserver> <input> <snapshot> <queryId> [--batch=<batch_size>]
-  fwd-intent-gen.py check <appserver> <input> <snapshot> [--csv]
+  fwd-intent-gen.py run <appserver> <input> <snapshot> <queryId> [--batch=<batch_size>] [--debug]
+  fwd-intent-gen.py check <appserver> <input> <snapshot> [--csv] [--debug]
 
 Options:
   -h --help             Show this help message
   --batch=<batch_size>  Configure batch size [default: 300]
   --csv                 "Dump into CSV file for import"
+  --debug               "Set Debug Flag [default: False]"
 """
 
 import math
@@ -21,6 +22,7 @@ import os
 from docopt import docopt
 from openpyxl.styles import Font
 from openpyxl import load_workbook
+import requests
 
 
 # Utilities
@@ -73,6 +75,9 @@ options = {
 # Get the username and password from environment variables.
 username = os.getenv("FWD_USER")
 password = os.getenv("FWD_PASSWORD")
+
+# Set Debug if needed
+debug = True if os.getenv("DEBUG") else False
 
 if not username or not password:
     print("Please provide both FWD_USER and FWD_PASSWORD.")
@@ -362,7 +367,9 @@ def error_queries(input, address_df):
                             ["address", "status", "origin", "description"],
                         ]
                         if record["status"].values[0] != "VALID":
-                            error_message = f"Error occurred. Address: {record['address'].values[0]}, Status: {record['status'].values[0]}, Description: {record['description'].values[0]}"
+                            error_message = f"Error occurred on Address: {record['address'].values[0]}, Source: {source}, Destination: {destination} , Status: {record['status'].values[0]}, Description: {record['description'].values[0]}"
+                            if debug: 
+                                print(error_message)
                             invalid_addresses.add(record["address"].values[0])
 
             error_df = address_df[address_df["address"].isin(invalid_addresses)].copy()
@@ -520,27 +527,21 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
     return response_json["items"][0]
 
 
-async def search_subnet(appserver, snapshot, addresses):
+def search_subnet(appserver, snapshot, addresses):
     result_list = []  # List to store the response JSON for each address
 
-    async with aiohttp.ClientSession() as session:
-        for address in addresses:
-            url = f"https://{appserver}/api/snapshots/{snapshot}/subnets"
-            params = {"address": address, "minimal": "true"}
-            response_text, response_status = await fetch(
-                session,
-                url,
-                params,
-                username=username,
-                password=password,
-                headers=headers,
-            )
-            if response_status == 200:
-                response_json = json.loads(response_text)
-                response_json["address"] = address
-                result_list.append(response_json)
-            else:
-                raise Exception(f"Error: {response_status}")
+    for address in addresses:
+        url = f"https://{appserver}/api/snapshots/{snapshot}/subnets"
+        params = {"address": address, "minimal": "true"}
+        response = requests.get(url, params=params, auth=(username, password), headers=headers)
+        
+        if response.status_code == 200:
+            response_json = response.json()
+            response_json["address"] = address
+            result_list.append(response_json)
+        else:
+            raise Exception(f"Error: {response.status_code}")
+    
     parsed_data = parse_subnets(result_list)
     df = pd.DataFrame(parsed_data)  # Create a dataframe from the result_df list
     return df
@@ -548,7 +549,12 @@ async def search_subnet(appserver, snapshot, addresses):
 
 def main():
     arguments = docopt(__doc__)
+    global debug 
+    debug = arguments['--debug']
+    print(f"Debug: {debug}")
+
     if arguments["run"]:
+        print("Running Run")
         infile = arguments["<input>"]
         appserver = arguments["<appserver>"]
         snapshot = arguments["<snapshot>"]
@@ -560,7 +566,7 @@ def main():
         report = f"intent-gen-{snapshot}.xlsx"
         pd.set_option("display.max_rows", None)  # Show all rows
         addresses = search_address(data)
-        address_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
+        address_df = search_subnet(appserver, snapshot, addresses)
         intent = asyncio.run(
             process_input(appserver, snapshot, data, address_df, batchsize)
         )
@@ -662,7 +668,7 @@ def main():
         with open(infile) as file:
             data = json.load(file)
         addresses = search_address(data)
-        address_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
+        address_df = search_subnet(appserver, snapshot, addresses)
         errored_devices = error_queries(data, address_df)
         if arguments["--csv"]:
             errored_devices.loc[:, ["address", "hostname"]].to_csv(report, index=False)
