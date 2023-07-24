@@ -521,10 +521,13 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
             headers=headers,
         )
         if response_status == 200:
-            response_json = json.loads(response_text)
+            response_json = json.loads(response_text)['items'][0]
+            if debug:
+                print(f"Debug: {response_json}")
         else:
             raise Exception(f"Error: {response_status} {response_text}")
-    return response_json["items"][0]
+        return response_json
+
 
 
 def search_subnet(appserver, snapshot, addresses):
@@ -592,10 +595,17 @@ def main():
                         interface,
                     )
                 )
-                updatedf.loc[index, "hostAddress"] = hosts["Address"]
-                updatedf.loc[index, "MacAddress"] = hosts["MacAddress"]
-                updatedf.loc[index, "OUI"] = hosts["OUI"]
-                updatedf.loc[index, "hostInterface"] = hosts["Interface"]
+                try:
+                    updatedf.loc[index, "hostAddress"] = hosts["Address"]
+                    updatedf.loc[index, "MacAddress"] = hosts["MacAddress"]
+                    updatedf.loc[index, "OUI"] = hosts["OUI"]
+                    updatedf.loc[index, "hostInterface"] = hosts["Interface"]
+                except TypeError:
+                    # Handle the case when hosts is None
+                    updatedf.loc[index, "hostAddress"] = None
+                    updatedf.loc[index, "MacAddress"] = None
+                    updatedf.loc[index, "OUI"] = None
+                    updatedf.loc[index, "hostInterface"] = None
         print(
             updatedf[
                 [
