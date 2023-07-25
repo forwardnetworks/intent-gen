@@ -459,7 +459,8 @@ async def process_input(appserver, snapshot, input, address_df, batch_size):
                         parsed_data.extend(json.loads(line) for line in lines if line)
                         # Cleanup for dataframe import
                         fix_data = check_info_paths(parsed_data)
-                        # print(f"debug {fix_data}")
+                        if debug: 
+                            print(f"debug {fix_data}")
 
                         r = pd.json_normalize(
                             fix_data,
@@ -478,9 +479,14 @@ async def process_input(appserver, snapshot, input, address_df, batch_size):
                         merged_df = pd.merge(
                             r, query_list_df, left_index=True, right_index=True
                         )
-                        dfs.append(merged_df)
+                        size = merged_df.shape
+                        if debug:
+                            print("Size of merged_df:", size)
 
-    return pd.concat(dfs, ignore_index=True)
+                        dfs.append(merged_df)
+                        if (len(dfs) > 0):
+                            return pd.concat(dfs, ignore_index=True)
+                        return dfs
 
 
 def search_address(input):
