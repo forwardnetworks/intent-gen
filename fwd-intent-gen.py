@@ -11,6 +11,7 @@ Options:
 """
 
 import math
+import re
 import socket
 import sys
 import pandas as pd
@@ -154,18 +155,16 @@ def return_firstlast_hop(df):
             first_hop_deviceType = firsthop.get("deviceType")
             last_hop_device_name = lasthop.get("deviceName")
             last_hop_deviceType = lasthop.get("deviceType")
-            df.at[index, "firstHopDevice"] = first_hop_device_name
-            df.at[index, "firstHopDeviceType"] = first_hop_deviceType
-            df.at[index, "lastHopDevice"] = last_hop_device_name
-            df.at[index, "lastHopDeviceType"] = last_hop_deviceType
-            df.at[index, "lastHopEgressIntf"] = lasthop.get("egressInterface")
-            if "egressInterface" in lasthop:
-                df.at[index, "lastHopEgressIntf"] = lasthop["egressInterface"]
+            last_hop_egressIntf = lasthop.get("egressInterface")
 
-            else:
-                df.at[index, "lastHopEgressIntf"] = None
-            filtered = remove_columns_df(df, ["hops"])
-    return filtered
+            df["firstHopDevice"] = first_hop_device_name
+            df["firstHopDeviceType"] = first_hop_deviceType
+            df["lastHopDevice"] = last_hop_device_name
+            df["lastHopDeviceType"] = last_hop_deviceType
+            df["lastHopEgressIntf"] = last_hop_egressIntf
+
+            remove_columns_df(df, ["hops"])
+    return df
 
 
 def addForwardingOutcomes(result):
@@ -369,7 +368,7 @@ def error_queries(input, address_df):
                         ]
                         if record["status"].values[0] != "VALID":
                             error_message = f"Error occurred on Address: {record['address'].values[0]}, Source: {source}, Destination: {destination} , Status: {record['status'].values[0]}, Description: {record['description'].values[0]}"
-                            if debug: 
+                            if debug:
                                 print(error_message)
                             invalid_addresses.add(record["address"].values[0])
 
@@ -460,7 +459,7 @@ async def process_input(appserver, snapshot, input, address_df, batch_size):
                         parsed_data.extend(json.loads(line) for line in lines if line)
                         # Cleanup for dataframe import
                         fix_data = check_info_paths(parsed_data)
-                        if debug: 
+                        if debug:
                             print(f"debug {fix_data}")
 
                         r = pd.json_normalize(
@@ -485,7 +484,7 @@ async def process_input(appserver, snapshot, input, address_df, batch_size):
                             print("Size of merged_df:", size)
 
                         dfs.append(merged_df)
-                        if (len(dfs) > 0):
+                        if len(dfs) > 0:
                             return pd.concat(dfs, ignore_index=True)
                         return dfs
 
@@ -527,14 +526,18 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
             password=password,
             headers=headers,
         )
+        if debug:
+            print(
+                f"DEBUG: nqe_get_hosts_by_port: Device: {device}, Port: {port} \n {response_text}"
+            )
+
         if response_status == 200:
-            response_json = json.loads(response_text)['items'][0]
+            response_json = json.loads(response_text)["items"][0]
             if debug:
                 print(f"Debug: {response_json}")
         else:
             raise Exception(f"Error: {response_status} {response_text}")
         return response_json
-
 
 
 def search_subnet(appserver, snapshot, addresses):
@@ -543,15 +546,17 @@ def search_subnet(appserver, snapshot, addresses):
     for address in addresses:
         url = f"https://{appserver}/api/snapshots/{snapshot}/subnets"
         params = {"address": address, "minimal": "true"}
-        response = requests.get(url, params=params, auth=(username, password), headers=headers)
-        
+        response = requests.get(
+            url, params=params, auth=(username, password), headers=headers
+        )
+
         if response.status_code == 200:
             response_json = response.json()
             response_json["address"] = address
             result_list.append(response_json)
         else:
             raise Exception(f"Error: {response.status_code}")
-    
+
     parsed_data = parse_subnets(result_list)
     df = pd.DataFrame(parsed_data)  # Create a dataframe from the result_df list
     return df
@@ -559,8 +564,8 @@ def search_subnet(appserver, snapshot, addresses):
 
 def main():
     arguments = docopt(__doc__)
-    global debug 
-    debug = arguments['--debug']
+    global debug
+    debug = arguments["--debug"]
     print(f"Debug: {debug}")
 
     if arguments["run"]:
@@ -582,16 +587,24 @@ def main():
         )
         forwarding_outcomes = addForwardingOutcomes(intent)
         updatedf = return_firstlast_hop(forwarding_outcomes)
+
+        host_addresses = []
+        mac_addresses = []
+        ouis = []
+        host_interfaces = []
+        
         for index, row in updatedf.iterrows():
             device = row["lastHopDevice"]
             interface = row["lastHopEgressIntf"]
             forwardingOutcome = row["forwardingOutcome"]
             outcomes = ["DELIVERED", "NOT_DELIVERED"]
+
             if (
                 device
                 and forwardingOutcome
                 and interface
                 and forwardingOutcome not in outcomes
+                and not bool(re.match(r"^self\..*", interface))
             ):
                 hosts = asyncio.run(
                     nqe_get_hosts_by_port(
@@ -602,17 +615,21 @@ def main():
                         interface,
                     )
                 )
-                try:
-                    updatedf.loc[index, "hostAddress"] = hosts["Address"]
-                    updatedf.loc[index, "MacAddress"] = hosts["MacAddress"]
-                    updatedf.loc[index, "OUI"] = hosts["OUI"]
-                    updatedf.loc[index, "hostInterface"] = hosts["Interface"]
-                except TypeError:
-                    # Handle the case when hosts is None
-                    updatedf.loc[index, "hostAddress"] = None
-                    updatedf.loc[index, "MacAddress"] = None
-                    updatedf.loc[index, "OUI"] = None
-                    updatedf.loc[index, "hostInterface"] = None
+                host_addresses.append(hosts["Address"])
+                mac_addresses.append(hosts["MacAddress"])
+                ouis.append(hosts["OUI"])
+                host_interfaces.append(hosts["Interface"])
+            else:
+                host_addresses.append(None)
+                mac_addresses.append(None)
+                ouis.append(None)
+                host_interfaces.append(None)
+
+        updatedf["hostAddress"] = host_addresses
+        updatedf["MacAddress"] = mac_addresses
+        updatedf["OUI"] = ouis
+        updatedf["hostInterface"] = host_interfaces
+
         print(
             updatedf[
                 [
@@ -671,7 +688,7 @@ def main():
                 "forwardDescription",
                 "forwardRemedy",
                 "securityDescription",
-                "securityRemedy"
+                "securityRemedy",
             ]
         ].to_excel(report, index=True)
         update_font(report)
