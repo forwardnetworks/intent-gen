@@ -246,63 +246,45 @@ def check_info_paths(data):
 
 
 def parse_subnets(data):
+    origin_descriptions = {
+        "HOST": {
+            "description": "Host Interface",
+            "data_key": "hosts"
+        },
+        "INTERFACE": {
+            "description": "Device Interface",
+            "data_key": "interfaces"
+        },
+        "INTERFACE_ATTACHED_SUBNET": {
+            "description": "Incorrect device address",
+            "data_key": None
+        },
+        "UNKNOWN": {
+            "description": "UNKNOWN",
+            "data_key": None
+        }
+    }
+
     parsed_data = []
     for item in data:
         try:
-            # print(f"Item->{item}")
             origin = item["origin"]
-            if origin == "HOST":
-                parsed_data.append(
-                    {
-                        "address": item["address"],
-                        "origin": "HOST",
-                        "description": "Host Interface",
-                        "status": "VALID",
-                        "data": item["hosts"],
-                    }
-                )
-            elif origin == "INTERFACE":
-                parsed_data.append(
-                    {
-                        "address": item["address"],
-                        "origin": "INTERFACE",
-                        "description": "Device Interface",
-                        "status": "VALID",
-                        "data": item["interfaces"],
-                    }
-                )
-            elif origin == "INTERFACE_ATTACHED_SUBNET":
-                # locations = item["locations"]
-                parsed_data.append(
-                    {
-                        "address": item["address"],
-                        "origin": "INTERFACE_ATTACHED_SUBNET",
-                        "description": "Incorrect device address",
-                        "status": "INVALID",
-                        "data": None,
-                    }
-                )
-            else:
-                parsed_data.append(
-                    {
-                        "address": item["address"],
-                        "origin": "UNKNOWN",
-                        "description": "UNKNWON",
-                        "status": "INVALID",
-                        "data": None,
-                    }
-                )
-
+            origin_info = origin_descriptions.get(origin, {})
+            parsed_data.append({
+                "address": item["address"],
+                "origin": origin,
+                "description": origin_info.get("description", "INVALID"),
+                "status": "VALID" if origin_info else "INVALID",
+                "data": item.get(origin_info.get("data_key"))
+            })
         except KeyError:
-            parsed_data.append(
-                {
-                    "address": item["address"],
-                    "origin": "ERROR",
-                    "description": "Address not found in network model",
-                    "status": "INVALID",
-                    "data": None,
-                }
-            )
+            parsed_data.append({
+                "address": item["address"],
+                "origin": "ERROR",
+                "description": "Address not found in network model",
+                "status": "INVALID",
+                "data": None
+            })
 
     return parsed_data
 
@@ -349,43 +331,49 @@ def fixup_queries(input):
                 queries.append(query)
     return queries
 
-
 def error_queries(input, address_df):
-    invalid_addresses = set()
+    invalid_sources = set()
+    invalid_destinations = set()
+    error_messages = []
+
     for region, data in input.items():
         for application, app in data.items():
             sources = app.get("source", [])
             destinations = app.get("destination", [])
-            for source in sources:
-                for destination in destinations:
-                    if (address_df["address"] == source).any() or (
-                        address_df["address"] == destination
-                    ).any():
-                        record = address_df.loc[
-                            (address_df["address"] == source)
-                            | (address_df["address"] == destination),
-                            ["address", "status", "origin", "description"],
-                        ]
-                        if record["status"].values[0] != "VALID":
-                            error_message = f"Error occurred on Address: {record['address'].values[0]}, Source: {source}, Destination: {destination} , Status: {record['status'].values[0]}, Description: {record['description'].values[0]}"
-                            if debug:
-                                print(error_message)
-                            invalid_addresses.add(record["address"].values[0])
 
-            error_df = address_df[address_df["address"].isin(invalid_addresses)].copy()
+            addresses = address_df["address"].isin(sources + destinations)
+            records = address_df[addresses]
 
-            print(f"\nErrors:\n{region}\n{application}\n")
-            for index, row in error_df.iterrows():
+            invalid_records = records[records["status"] != "VALID"]
+            invalid_sources.update(invalid_records[invalid_records["address"].isin(sources)]["address"])
+            invalid_destinations.update(invalid_records[invalid_records["address"].isin(destinations)]["address"])
+
+            for index, row in invalid_records.iterrows():
                 address = row["address"]
                 hostname = resolve_ip_to_domain(address)
-                error_df.loc[index, "hostname"] = hostname
-                print(
+                error_messages.append(
                     f"Error occurred. Address: {row['address']}, Name: {hostname}, Origin: {row['origin']} Status: {row['status']}, Description: {row['description']}"
                 )
 
-            print()
-            return error_df
+    error_source_df = address_df[address_df["address"].isin(invalid_sources)].copy()
+    error_source_df["hostname"] = error_source_df["address"].apply(resolve_ip_to_domain)
 
+    error_destination_df = address_df[address_df["address"].isin(invalid_destinations)].copy()
+    error_destination_df["hostname"] = error_destination_df["address"].apply(resolve_ip_to_domain)
+    
+    error_df = pd.concat([error_source_df, error_destination_df]).drop_duplicates()
+    
+    print("\nErrors - Sources:\n")
+    for message in error_messages:
+        if any(source in message for source in invalid_sources):
+            print(message)
+
+    print("\nErrors - Destinations:\n")
+    for message in error_messages:
+        if any(destination in message for destination in invalid_destinations):
+            print(message)
+
+    return error_df
 
 async def process_input(appserver, snapshot, input, address_df, batch_size):
     async with aiohttp.ClientSession() as session:
@@ -561,11 +549,10 @@ def search_subnet(appserver, snapshot, addresses):
     df = pd.DataFrame(parsed_data)  # Create a dataframe from the result_df list
     return df
 
-
 def main():
     arguments = docopt(__doc__)
     global debug
-    debug = arguments["--debug"]
+    debug=arguments["--debug"]
     print(f"Debug: {debug}")
 
     if arguments["run"]:
@@ -576,15 +563,21 @@ def main():
         queryId = arguments["<queryId>"]
         batchsize = int(arguments["--batch"])
         print(f"Setting batch size: {batchsize}")
+        
         with open(infile) as file:
             data = json.load(file)
+        
         report = f"intent-gen-{snapshot}.xlsx"
-        pd.set_option("display.max_rows", None)  # Show all rows
+        if debug:
+            pd.set_option("display.max_rows", None)  # Show all rows
+        
         addresses = search_address(data)
         address_df = search_subnet(appserver, snapshot, addresses)
+        
         intent = asyncio.run(
             process_input(appserver, snapshot, data, address_df, batchsize)
         )
+        
         forwarding_outcomes = addForwardingOutcomes(intent)
         updatedf = return_firstlast_hop(forwarding_outcomes)
 
@@ -592,7 +585,7 @@ def main():
         mac_addresses = []
         ouis = []
         host_interfaces = []
-        
+
         for index, row in updatedf.iterrows():
             device = row["lastHopDevice"]
             interface = row["lastHopEgressIntf"]
@@ -630,67 +623,40 @@ def main():
         updatedf["OUI"] = ouis
         updatedf["hostInterface"] = host_interfaces
 
-        print(
-            updatedf[
-                [
-                    "region",
-                    "application",
-                    "srcIp",
-                    "dstIp",
-                    "ipProto",
-                    "dstPort",
-                    "forwardingOutcome",
-                    "securityOutcome",
-                    "srcIpLocationType",
-                    "dstIpLocationType",
-                    "pathCount",
-                    "forwardHops",
-                    "returnPathCount",
-                    "returnHops",
-                    "firstHopDevice",
-                    # "firstHopDeviceType",
-                    "lastHopDevice",
-                    "lastHopEgressIntf",
-                    # "lastHopDeviceType",
-                    "hostAddress",
-                    "MacAddress",
-                    "OUI",
-                    "hostInterface",
-                ]
-            ]
-        )
-        updatedf[
-            [
-                "region",
-                "application",
-                "srcIp",
-                "dstIp",
-                "ipProto",
-                "dstPort",
-                "forwardingOutcome",
-                "securityOutcome",
-                "srcIpLocationType",
-                "dstIpLocationType",
-                "pathCount",
-                "forwardHops",
-                "returnPathCount",
-                "returnHops",
-                "firstHopDevice",
-                "firstHopDeviceType",
-                "lastHopDevice",
-                "lastHopDeviceType",
-                "lastHopEgressIntf",
-                "hostAddress",
-                "MacAddress",
-                "OUI",
-                "hostInterface",
-                "queryUrl",
-                "forwardDescription",
-                "forwardRemedy",
-                "securityDescription",
-                "securityRemedy",
-            ]
-        ].to_excel(report, index=True)
+        columns_to_display = [
+            "region",
+            "application",
+            "srcIp",
+            "dstIp",
+            "ipProto",
+            "dstPort",
+            "forwardingOutcome",
+            "securityOutcome",
+            "srcIpLocationType",
+            "dstIpLocationType",
+            "pathCount",
+            "forwardHops",
+            "returnPathCount",
+            "returnHops",
+            "firstHopDevice",
+            # "firstHopDeviceType",
+            "lastHopDevice",
+            "lastHopEgressIntf",
+            # "lastHopDeviceType",
+            "hostAddress",
+            "MacAddress",
+            "OUI",
+            "hostInterface",
+        ]
+        
+        print(updatedf[columns_to_display])
+        updatedf[columns_to_display + [
+            "queryUrl",
+            "forwardDescription",
+            "forwardRemedy",
+            "securityDescription",
+            "securityRemedy",
+        ]].to_excel(report, index=True)
         update_font(report)
 
     elif arguments["check"]:
@@ -699,11 +665,15 @@ def main():
         appserver = arguments["<appserver>"]
         snapshot = arguments["<snapshot>"]
         report = f"errored-devices-{snapshot}.csv"
+        
         with open(infile) as file:
             data = json.load(file)
+        
         addresses = search_address(data)
         address_df = search_subnet(appserver, snapshot, addresses)
+        
         errored_devices = error_queries(data, address_df)
+        
         if arguments["--csv"]:
             errored_devices.loc[:, ["address", "hostname"]].to_csv(report, index=False)
 
