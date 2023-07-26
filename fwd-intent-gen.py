@@ -164,7 +164,8 @@ def return_firstlast_hop(df):
 
             else:
                 df.at[index, "lastHopEgressIntf"] = None
-    return remove_columns_df(df, ["hops"])
+            filtered = remove_columns_df(df, ["hops"])
+    return filtered
 
 
 def addForwardingOutcomes(result):
