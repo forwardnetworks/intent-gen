@@ -1,7 +1,8 @@
 """
 Usage:
-  fwd-intent-gen.py run <appserver> <input> <snapshot> <queryId> [--batch=<batch_size>] [--debug]
+  fwd-intent-gen.py run <appserver> <input> <snapshot> <queryId> [--batch=<batch_size>] [--withdiag] [--debug]
   fwd-intent-gen.py check <appserver> <input> <snapshot> [--csv] [--debug]
+  fwd-intent-gen.py from_hosts <appserver> <snapshot> <queryId>  [--batch=<batch_size>] [--withdiag] [--debug] 
 
 Options:
   -h --help             Show this help message
@@ -10,6 +11,8 @@ Options:
   --debug               "Set Debug Flag [default: False]"
 """
 
+import ast
+import itertools
 import math
 import re
 import socket
@@ -25,8 +28,95 @@ from openpyxl.styles import Font
 from openpyxl import load_workbook
 import requests
 
+from tqdm import tqdm
+from time import sleep
+
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Utilities
+
+
+def parse_start_end(s):
+    pattern = r"start:(\d+), end:(\d+)"
+    match = re.search(pattern, s)
+    if match:
+        start_value = match.group(1)
+        end_value = match.group(2)
+        if start_value == end_value:
+            return start_value
+        else:
+            return f"{start_value}-{end_value}"
+
+
+host_query = """
+getAcl =
+  foreach device in network.devices
+  foreach aclEntry in device.aclEntries
+  select {
+    sources: (foreach s in aclEntry.headerMatches.ipv4Src
+              select s),
+    destinations: (foreach d in aclEntry.headerMatches.ipv4Dst
+                   select d),
+    action:    when aclEntry.action is
+                       DENY -> "DENY";
+                       PBR -> "PBR";
+                       PERMIT -> "PERMIT",
+    protocols: (foreach t in aclEntry.headerMatches.ipProtocol select {start: t.start, end: t.end}),
+    dstports: (foreach p in aclEntry.headerMatches.tpDst select {start: p.start, end: p.end}),
+    name: aclEntry.name
+  };
+
+getHosts =
+  foreach d in network.devices
+  foreach hosts in d.hosts
+  foreach host in hosts.addresses
+  select host;
+
+foreach x in [0]
+let acls = distinct(getAcl())
+let hosts = getHosts()
+foreach acl in acls
+foreach host in hosts
+where host in acl.sources || host in acl.destinations
+group acl as a
+  by { name: acl.name,
+       src: acl.sources,
+       dst: acl.destinations,
+       protos: acl.protocols,
+       dstPorts: acl.dstports,
+       hostCount: length(hosts)
+    }
+    as b
+select distinct { application: b.name, sources: b.src, destinations: b.dst, protocols: b.protos, dstPorts: b.dstPorts}
+"""
+
+
+def nqe_get_hosts_from_acl(query, appserver, snapshot):
+    url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
+    body = {
+        "query": query,
+    }
+
+    response = requests.post(
+        url, json=body, auth=(username, password), headers=headers, verify=False
+    )
+
+    response_text = response.text
+    response_status = response.status_code
+
+    # if debug:
+    #     print(f"DEBUG: nqe_get_hosts_from_acl: \n {response_text}")
+
+    if response_status == 200:
+        response_json = response.json()["items"]
+        # if debug:
+        #     print(f"Debug: {response_json}")
+    else:
+        raise Exception(f"Error: {response_status} {response_text}")
+
+    return response_json
 
 
 def remove_columns_df(df, columns):
@@ -296,11 +386,13 @@ async def fetch(
     auth = aiohttp.BasicAuth(username, password) if username and password else None
     if method == "GET":
         async with session.get(
-            url, auth=auth, params=data, headers=headers
+            url, auth=auth, params=data, headers=headers, ssl=False
         ) as response:
             return await response.read(), response.status
     elif method == "POST":
-        async with session.post(url, auth=auth, headers=headers, json=data) as response:
+        async with session.post(
+            url, auth=auth, headers=headers, json=data, ssl=False
+        ) as response:
             return await response.read(), response.status
     else:
         raise ValueError(f"Invalid HTTP method: {method}")
@@ -388,25 +480,28 @@ def error_queries(input, address_df):
     return error_df
 
 
-async def process_input(appserver, snapshot, input, address_df, batch_size):
+async def process_input(appserver, snapshot, input_df, batch_size, address_df=None):
     async with aiohttp.ClientSession() as session:
         dfs = []  # List to store individual dataframes
-        for region, data in input.items():
-            for application, app in data.items():
-                sources = app.get("source", [])
-                destinations = app.get("destination", [])
-                ipProto = app.get("ipProto", [])
-                dstPorts = app.get("dstPorts", [])
+        for index, row in input_df.iterrows():
+            region = row["region"]
+            sources = row["sources"]
+            destinations = row["destinations"]
+            protocols = row["protocols"]
+            dstPorts = row["dstPorts"]
+            application = row["application"]
 
-                print(f"Region: {region}")
-                print(f"Application: {application}")
-                print(f"Search Count: {len(sources) * len(destinations)}\n")
+            print(f"Region: {region}")
+            print(f"Application: {application}")
+            print(f"Search Count: {len(sources) * len(destinations)}\n")
 
+            # check hosts are locatable if from external input
+            if address_df is not None:
                 filtered_queries = [
                     {
                         "srcIp": source,
                         "dstIp": destination,
-                        "ipProto": ipProto,
+                        "ipProto": protocols,
                         "dstPort": dstPorts,
                     }
                     for source in sources
@@ -420,72 +515,79 @@ async def process_input(appserver, snapshot, input, address_df, batch_size):
                         & (address_df["status"] == "VALID")
                     ).any()
                 ]
+            else:
+                filtered_queries = [
+                    {
+                        "srcIp": source,
+                        "dstIp": destination,
+                        **({"ipProto": protocols} if not re.match(r'\d+-\d+', protocols) else {}),
+                        "dstPort": dstPorts,
+                    }
+                    for source in sources
+                    for destination in destinations
+                ]
 
-                query_list_df = pd.DataFrame(filtered_queries)
-                print()
-                query_list_df["region"] = region
-                query_list_df["application"] = application
-                total_queries = len(filtered_queries)
+            query_list_df = pd.DataFrame(filtered_queries)
+            print()
+            query_list_df["region"] = region
+            query_list_df["application"] = application
+            total_queries = len(filtered_queries)
 
-                if total_queries > 0:
-                    num_batches = math.ceil(total_queries / batch_size)
-                    for i in range(num_batches):
-                        start_index = i * batch_size
-                        end_index = min((i + 1) * batch_size, total_queries)
-                        batch_queries = filtered_queries[start_index:end_index]
-                        body = {"queries": batch_queries, **options}
+            if total_queries > 0:
+                num_batches = math.ceil(total_queries / batch_size)
+                for i in tqdm(range(num_batches), desc="Search"):
+                    start_index = i * batch_size
+                    end_index = min((i + 1) * batch_size, total_queries)
+                    batch_queries = filtered_queries[start_index:end_index]
+                    body = {"queries": batch_queries, **options}
 
-                        url = (
-                            f"https://{appserver}/api/snapshots/{snapshot}/pathsBulkSeq"
-                        )
-                        response_text, response_status = await fetch(
-                            session,
-                            url,
-                            body,
-                            method="POST",
-                            username=username,
-                            password=password,
-                            headers=headers_seq,
-                        )
-                        parsed_data = []
-                        # Check if the request was successful.
-                        if response_status != 200:
-                            raise aiohttp.ClientResponseError(
-                                request_info=None,
-                                history=None,
-                                status=response_status,
-                                message="Request failed",
-                            )
-                        lines = response_text.decode().split("\x1E")
-                        parsed_data.extend(json.loads(line) for line in lines if line)
-                        # Cleanup for dataframe import
-                        fix_data = check_info_paths(parsed_data)
 
-                        r = pd.json_normalize(
-                            fix_data,
-                            record_path=["info", "paths"],
-                            meta=[
-                                "dstIpLocationType",
-                                "srcIpLocationType",
-                                "pathCount",
-                                "forwardHops",
-                                "returnPathCount",
-                                "returnHops",
-                                "queryUrl",
-                            ],
-                            # errors="ignore",
-                        )
-                        merged_df = pd.merge(
-                            r, query_list_df, left_index=True, right_index=True
-                        )
-                        size = merged_df.shape
-                        if debug:
-                            print("Size of merged_df:", size)
+           
 
-                        dfs.append(merged_df)
-                        if len(dfs) > 0:
-                            return pd.concat(dfs, ignore_index=True)
-                        return dfs
+
+                    url = f"https://{appserver}/api/snapshots/{snapshot}/pathsBulkSeq"
+                    response_text, response_status = await fetch(
+                        session,
+                        url,
+                        body,
+                        method="POST",
+                        username=username,
+                        password=password,
+                        headers=headers_seq,
+                    )
+
+                    parsed_data = []
+                    # Check if the request was successful.
+                    if response_status != 200:
+                        print(f"Request failed with status code: {response_status}\n result: {response_text}\n body: {body}")
+                        sys.exit(1)
+
+                    lines = response_text.decode().split("\x1E")
+                    parsed_data.extend(json.loads(line) for line in lines if line)
+                    # Cleanup for dataframe import
+                    fix_data = check_info_paths(parsed_data)
+
+                    paths_df = pd.json_normalize(
+                        fix_data,
+                        record_path=["info", "paths"],
+                        meta=[
+                            "dstIpLocationType",
+                            "srcIpLocationType",
+                            "pathCount",
+                            "forwardHops",
+                            "returnPathCount",
+                            "returnHops",
+                            "queryUrl",
+                        ],
+                        # errors="ignore",
+                    )
+                    merged_df = pd.merge(
+                        paths_df, query_list_df, left_index=True, right_index=True
+                    )
+                    dfs.append(merged_df)
+    if len(dfs) > 0:
+        pd.concat(dfs, ignore_index=True)
+    return dfs
 
 
 def search_address(input):
@@ -525,18 +627,14 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
             password=password,
             headers=headers,
         )
-        if debug:
-            print(
-                f"DEBUG: nqe_get_hosts_by_port: Device: {device}, Port: {port} \n {response_text}"
-            )
 
         if response_status == 200:
-            response_json = json.loads(response_text)["items"][0]
+            response_json = json.loads(response_text)
+            return response_json["items"]
             if debug:
                 print(f"Debug: {response_json}")
         else:
             raise Exception(f"Error: {response_status} {response_text}")
-        return response_json
 
 
 def search_subnet(appserver, snapshot, addresses):
@@ -579,6 +677,8 @@ def main():
         with open(infile) as file:
             data = json.load(file)
 
+        df = pd.DataFrame(data)
+
         report = f"intent-gen-{snapshot}.xlsx"
         if debug:
             pd.set_option("display.max_rows", None)  # Show all rows
@@ -587,7 +687,7 @@ def main():
         address_df = search_subnet(appserver, snapshot, addresses)
 
         intent = asyncio.run(
-            process_input(appserver, snapshot, data, address_df, batchsize)
+            process_input(appserver, snapshot, df, address_df, batchsize)
         )
 
         forwarding_outcomes = addForwardingOutcomes(intent)
@@ -600,9 +700,7 @@ def main():
 
         for index, row in updatedf.iterrows():
             device = row.get("lastHopDevice", None)
-
             interface = row.get("lastHopEgressIntf", None)
-
             forwardingOutcome = row["forwardingOutcome"]
             outcomes = ["DELIVERED", "NOT_DELIVERED"]
             if (
@@ -695,6 +793,133 @@ def main():
         if arguments["--csv"]:
             errored_devices.loc[:, ["address", "hostname"]].to_csv(report, index=False)
 
+    elif arguments["from_hosts"]:
+        print("Running from_hosts")
+        appserver = arguments["<appserver>"]
+        snapshot = arguments["<snapshot>"]
+
+        appserver = arguments["<appserver>"]
+        snapshot = arguments["<snapshot>"]
+        queryId = arguments["<queryId>"]
+        batchsize = int(arguments["--batch"])
+        print(f"Setting batch size: {batchsize}")
+
+        report = f"intent-gen-{snapshot}.xlsx"
+        if debug:
+            pd.set_option("display.max_rows", None)  # Show all rows
+
+        # Retrieve all possible ACLs where a source or destination is locatable in the model
+        data = nqe_get_hosts_from_acl(host_query, appserver, snapshot)
+        acls_df = pd.DataFrame(data)
+        acls_df.sort_values(by='application')
+        
+        # Add region to conform to input specification
+        acls_df["region"] = "Default"
+        
+        # Fixup port ranges from input 
+        acls_df["dstPorts"] = acls_df["dstPorts"].apply(parse_start_end)
+        acls_df["protocols"] = acls_df["protocols"].apply(parse_start_end)
+        
+        # Fix list
+        for column in acls_df.columns:
+            if acls_df[column].apply(lambda x: isinstance(x, list)).any():
+                acls_df[column] = acls_df[column].apply(tuple)
+       
+        acls_df.drop_duplicates(inplace=True)
+
+        if debug:
+            print(acls_df)
+
+        intent = asyncio.run(process_input(appserver, snapshot, acls_df, batchsize))
+
+        forwarding_outcomes = addForwardingOutcomes(intent)
+        updatedf = return_firstlast_hop(forwarding_outcomes)
+
+        host_addresses = []
+        mac_addresses = []
+        ouis = []
+        host_interfaces = []
+
+        for index, row in updatedf.iterrows():
+            device = updatedf.at[index,"lastHopDevice"]
+            interface = updatedf.at[index,"lastHopEgressIntf"]
+            forwardingOutcome = updatedf.at[index,"forwardingOutcome"]
+            outcomes = ["DELIVERED", "NOT_DELIVERED"]
+
+            if (
+                device
+                and forwardingOutcome
+                and interface
+                and forwardingOutcome not in outcomes
+                and not bool(re.match(r"^self\..*", interface))
+            ):
+                hosts = asyncio.run(
+                    nqe_get_hosts_by_port(
+                        queryId,
+                        appserver,
+                        snapshot,
+                        device,
+                        interface,
+                    )
+                )
+                # Note we should just get one address returned that matches the device and port.
+                if hosts:
+                    updatedf.at[index, "hostAddress"] = hosts[0].get("Address", None)
+                    updatedf.at[index, "MacAddress"] = hosts[0].get("MacAddress", None)
+                    updatedf.at[index, "OUI"] = hosts[0].get("OUI", None)
+                    updatedf.at[index, "hostInterface"] = hosts[0].get(
+                        "Interface", None
+                    )
+                else:
+                    updatedf
+
+        columns_to_display = [
+            "region",
+            "application",
+            "srcIp",
+            "dstIp",
+            "ipProto",
+            "dstPort",
+            "forwardingOutcome",
+            "securityOutcome",
+            "srcIpLocationType",
+            "dstIpLocationType",
+            "pathCount",
+            "forwardHops",
+            "returnPathCount",
+            "returnHops",
+            "firstHopDevice",
+            # "firstHopDeviceType",
+            "lastHopDevice",
+            "lastHopEgressIntf",
+            # "lastHopDeviceType",
+            "hostAddress",
+            "MacAddress",
+            "OUI",
+            "hostInterface",
+        ]
+
+        print(updatedf[columns_to_display])
+        if arguments["--withdiag"]:
+            updatedf[
+                columns_to_display
+                + [
+                    "queryUrl",
+                    "forwardDescription",
+                    "forwardRemedy",
+                    "securityDescription",
+                    "securityRemedy",
+                ]
+            ].to_excel(report, index=True)
+        else:
+            updatedf[
+                columns_to_display
+                + [
+                    "queryUrl",
+                ]
+            ].to_excel(report, index=True)
+        update_font(report)
+
     else:
         print(
             "Invalid command. Please refer to the usage message for available commands."
@@ -703,3 +928,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python fwd-intent-gen.py run fwd.app input.json 627174 Q_cf01d14087eb77f855397e2b73623ea2b2751893 --debug
