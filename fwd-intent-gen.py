@@ -1,8 +1,8 @@
 """
 Usage:
   fwd-intent-gen.py run <appserver> <input> <snapshot> <queryId> [--batch=<batch_size>] [--withdiag] [--debug]
-  fwd-intent-gen.py check <appserver> <input> <snapshot> [--csv] [--debug]
   fwd-intent-gen.py from_hosts <appserver> <snapshot> <queryId>  [--batch=<batch_size>] [--withdiag] [--debug] 
+  fwd-intent-gen.py check <appserver> <input> <snapshot> [--csv] [--debug]
 
 Options:
   -h --help             Show this help message
@@ -11,14 +11,11 @@ Options:
   --debug               "Set Debug Flag [default: False]"
 """
 
-import ast
-import itertools
 import math
 import re
 import socket
 import sys
 import pandas as pd
-import argparse
 import aiohttp
 import asyncio
 import json
@@ -29,7 +26,6 @@ from openpyxl import load_workbook
 import requests
 
 from tqdm import tqdm
-from time import sleep
 
 import urllib3
 
@@ -380,22 +376,25 @@ def parse_subnets(data):
     return parsed_data
 
 
-async def fetch(
-    session, url, data=None, method="GET", username=None, password=None, headers={}
-):
+async def fetch(session, url, data=None, method="GET", username=None, password=None, headers={}, retries=3, backoff_factor=0.2, timeout=60):
     auth = aiohttp.BasicAuth(username, password) if username and password else None
-    if method == "GET":
-        async with session.get(
-            url, auth=auth, params=data, headers=headers, ssl=False
-        ) as response:
-            return await response.read(), response.status
-    elif method == "POST":
-        async with session.post(
-            url, auth=auth, headers=headers, json=data, ssl=False
-        ) as response:
-            return await response.read(), response.status
-    else:
-        raise ValueError(f"Invalid HTTP method: {method}")
+    for retry in range(retries):
+        try:
+            if method == "GET":
+                async with session.get(url, auth=auth, params=data, headers=headers, ssl=False, timeout=timeout) as response:
+                    return await response.read(), response.status
+            elif method == "POST":
+                async with session.post(url, auth=auth, headers=headers, json=data, ssl=False, timeout=timeout) as response:
+                    return await response.read(), response.status
+            else:
+                raise ValueError(f"Invalid HTTP method: {method}")
+        except asyncio.TimeoutError:
+            print("... retrying")
+            if retry >= retries - 1:
+                raise
+            else:
+                sleep = backoff_factor * (2 ** retry)  # exponential backoff
+                await asyncio.sleep(sleep)
 
 
 def fixup_queries(input):
@@ -491,7 +490,7 @@ async def process_input(appserver, snapshot, input_df, batch_size, address_df=No
             dstPorts = row["dstPorts"]
             application = row["application"]
 
-            print(f"Region: {region}")
+            print(f"\n\nRegion: {region}")
             print(f"Application: {application}")
             print(f"Search Count: {len(sources) * len(destinations)}\n")
 
@@ -528,10 +527,14 @@ async def process_input(appserver, snapshot, input_df, batch_size, address_df=No
                 ]
 
             query_list_df = pd.DataFrame(filtered_queries)
-            print()
+
+            if debug:
+             print(query_list_df)
+
             query_list_df["region"] = region
             query_list_df["application"] = application
-            total_queries = len(filtered_queries)
+            total_queries = min(len(filtered_queries), 10000)
+
 
             if total_queries > 0:
                 num_batches = math.ceil(total_queries / batch_size)
@@ -541,20 +544,20 @@ async def process_input(appserver, snapshot, input_df, batch_size, address_df=No
                     batch_queries = filtered_queries[start_index:end_index]
                     body = {"queries": batch_queries, **options}
 
-
-           
-
-
                     url = f"https://{appserver}/api/snapshots/{snapshot}/pathsBulkSeq"
-                    response_text, response_status = await fetch(
-                        session,
-                        url,
-                        body,
-                        method="POST",
-                        username=username,
-                        password=password,
-                        headers=headers_seq,
-                    )
+                    try:
+                        response_text, response_status = await fetch(
+                            session,
+                            url,
+                            body,
+                            method="POST",
+                            username=username,
+                            password=password,
+                            headers=headers_seq,
+                        )
+                    except asyncio.TimeoutError:
+                        print("Request timed out. Skipping to next iteration.")
+                        continue
 
                     parsed_data = []
                     # Check if the request was successful.
@@ -588,6 +591,7 @@ async def process_input(appserver, snapshot, input_df, batch_size, address_df=No
     if len(dfs) > 0:
         pd.concat(dfs, ignore_index=True)
     return dfs
+
 
 
 def search_address(input):
@@ -631,8 +635,6 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
         if response_status == 200:
             response_json = json.loads(response_text)
             return response_json["items"]
-            if debug:
-                print(f"Debug: {response_json}")
         else:
             raise Exception(f"Error: {response_status} {response_text}")
 
@@ -655,7 +657,7 @@ def search_subnet(appserver, snapshot, addresses):
             raise Exception(f"Error: {response.status_code}")
 
     parsed_data = parse_subnets(result_list)
-    df = pd.DataFrame(parsed_data)  # Create a dataframe from the result_df list
+    df = pd.DataFrame(parsed_data)  
     return df
 
 
@@ -819,12 +821,18 @@ def main():
         # Fixup port ranges from input 
         acls_df["dstPorts"] = acls_df["dstPorts"].apply(parse_start_end)
         acls_df["protocols"] = acls_df["protocols"].apply(parse_start_end)
-        
+ 
         # Fix list
         for column in acls_df.columns:
             if acls_df[column].apply(lambda x: isinstance(x, list)).any():
                 acls_df[column] = acls_df[column].apply(tuple)
-       
+
+        # this won't work because of the way we handle dstPorts
+        # acls_df = acls_df.groupby(['application', 'sources', 'destinations']).agg({
+        #         'dstPorts': ', '.join,
+        #         'region': 'first',
+        #         'protocols': 'first'
+        #     }).reset_index()
         acls_df.drop_duplicates(inplace=True)
 
         if debug:
@@ -834,11 +842,6 @@ def main():
 
         forwarding_outcomes = addForwardingOutcomes(intent)
         updatedf = return_firstlast_hop(forwarding_outcomes)
-
-        host_addresses = []
-        mac_addresses = []
-        ouis = []
-        host_interfaces = []
 
         for index, row in updatedf.iterrows():
             device = updatedf.at[index,"lastHopDevice"]
