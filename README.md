@@ -3,13 +3,17 @@
 
 ```
 Usage:
-  fwd-intent-gen.py run <appserver> <input> <snapshot> <queryId> [--batch=<batch_size>]
-  fwd-intent-gen.py check <appserver> <input> <snapshot> [--csv]
+  fwd-intent-gen.py from_import <appserver> <input> <snapshot>  [--batch=<batch_size>] [--withdiag] [--debug]
+  fwd-intent-gen.py from_hosts <appserver> <snapshot>   [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
+  fwd-intent-gen.py check <appserver> <input> <snapshot> [--csv] [--debug]
 
 Options:
   -h --help             Show this help message
   --batch=<batch_size>  Configure batch size [default: 300]
   --csv                 "Dump into CSV file for import"
+  --debug               "Set Debug Flag [default: False]"
+  --limit=<limit>       "Limit to n applications (ACL-names) [default: 1000]
+  --max=<max_query>    "Max queries [default: 10000]
 ```
 
 ## Setup
@@ -20,28 +24,6 @@ The following environmental variables need to be set to local user accounts or A
 
 FWD_USER<BR>
 FWD_PASSWORD
-
-## Required NQE query for analysis
-The following query must be committed to the NQE Library and you need to extract the queryId as part of the `run` subcommand. This query will help
-operator discover missing devices along a failed path.
-
-```
-foreach device in network.devices
-foreach host in device.hosts
-where length(host.addresses) == 1
-foreach hostSubnet in host.addresses
-where length(hostSubnet) == 32
-foreach interface in host.interfaces
-where host.hostType == DeviceHostType.InferredHost
-select {
-  deviceName: device.name,
-  Address: address(hostSubnet),
-  MacAddress: host.macAddress,
-  OUI: if isPresent(host.macAddress) then ouiAssignee(host.macAddress) else "",
-  HostType: host.hostType,
-  Interface: interface,
-}
-```
 
 ## Usage
 
@@ -56,11 +38,16 @@ Dump errors to csv file for import into collection
 `python fwd-intent-gen.py check fwd.app input.json 627174 --csv`
 
 
-### Run
+### from_import
 
 Execute all checks, results are placed into an .xlsx file called `intent-gen-<snapshot>.xlsx`
 
-`python fwd-intent-gen.py run fwd.app input.json 627174 Q_cf01d14087eb77f855397e2b73623ea2b2751893`
+`python fwd-intent-gen.py from_import fwd.app input.json 627174`
+
+
+### from_hosts
+
+`python fwd-intent-gen.py from_hosts fwd.app 642218 --limit 5`
 
 
 #### Example Output

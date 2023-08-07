@@ -3,3 +3,4 @@ aiohttp
 docopt
 openpyxl
 requests
+tqdm
