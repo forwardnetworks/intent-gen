@@ -1,8 +1,8 @@
 """
 Usage:
-  fwd-intent-gen.py from_import <appserver> <input> <snapshot>  [--batch=<batch_size>] [--withdiag] [--debug]
+  fwd-intent-gen.py from_import <input> <appserver> <snapshot> [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
   fwd-intent-gen.py from_hosts <appserver> <snapshot>   [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
-  fwd-intent-gen.py check <appserver> <input> <snapshot> [--csv] [--debug]
+  fwd-intent-gen.py check <input> <appserver> <snapshot> [--csv] [--debug]
 
 Options:
   -h --help             Show this help message
@@ -167,6 +167,33 @@ headers = {
 
 # Utilities
 
+def test_communication(appserver):
+        try:
+            response = requests.get(f"https://{appserver}", timeout=10)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            print(f"HTTP communication failed with {appserver}.")
+            sys.exit(1)
+
+def flatten_input(data):
+    rows = []
+    for region, apps in data.items():
+        for app, details in apps.items():
+            rows.append(
+                [
+                    region,
+                    app,
+                    details["source"],
+                    details["destination"],
+                    details["ipProto"],
+                    details["dstPorts"],
+                ]
+            )
+    return pd.DataFrame(
+        rows,
+        columns=["region", "application", "sources", "destinations", "protocols", "dstPorts"],
+    )
+
 
 def remove_columns_df(df, columns):
     return df.drop(columns, axis=1)
@@ -233,9 +260,11 @@ def nqe_get_hosts_from_acl(query, appserver, snapshot):
     elif response_status == 401 or response_status == 403:
         print("Please set FWD_USER and FWD_PASSWORD to authentication credentials")
         sys.exit(1)
-
+    elif response_status == 401 or response_status == 409:
+        print("Snapshot is being processed, try again in a few")
+        sys.exit(1)
     else:
-        raise Exception(f"Error: {response_status} {response_text}")
+        raise
 
     return response_json
 
@@ -487,22 +516,20 @@ def error_queries(input, address_df):
 
     return error_df
 
+
 async def process_input(
     appserver, snapshot, input_df, batch_size, max_query, address_df=None
 ):
     async with aiohttp.ClientSession() as session:
         dfs = []  # List to store individual dataframes
         for index, row in input_df.iterrows():
+
             region = row["region"]
             sources = row["sources"]
             destinations = row["destinations"]
             protocols = row["protocols"]
             dstPorts = row["dstPorts"]
             application = row["application"]
-
-            # print(
-            #     f"\nRegion: {region} | Application: {application} | Search Count: {len(sources) * len(destinations)}\n"
-            # )
 
             # check hosts are locatable if from external input
             if address_df is not None:
@@ -543,7 +570,7 @@ async def process_input(
             query_list_df = pd.DataFrame(filtered_queries)
 
             if debug:
-                print(query_list_df)
+                print(f"\nDEBUG: QueryList\n{query_list_df}")
 
             query_list_df["region"] = region
             query_list_df["application"] = application
@@ -551,8 +578,8 @@ async def process_input(
             total_queries = min(len(filtered_queries), max_query)
 
             print(
-                    f"\nRegion: {region} | Application: {application} | Search Count: {total_queries}/{len(filtered_queries)}\n"
-                )
+                f"\nRegion: {region} | Application: {application} | Search Count: {total_queries}/{len(filtered_queries)}\n"
+            )
 
             if total_queries > 0:
                 num_batches = math.ceil(total_queries / batch_size)
@@ -627,6 +654,7 @@ def search_address(input):
         if key in ["source", "destination"]
         for a in value
     }
+    return addresses
     # for region, region_value in input.items():
     #     for service, service_value in region_value.items():
     #         if isinstance(service_value, dict):
@@ -682,10 +710,14 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
             return None
 
 
-async def run_process_input(appserver, snapshot, acls_df, batchsize, max_query, retries=3):
+async def run_process_input(
+    appserver, snapshot, acls_df, batchsize, max_query, retries=3
+):
     for retry in range(retries):
         try:
-            return await process_input(appserver, snapshot, acls_df, batchsize, max_query)
+            return await process_input(
+                appserver, snapshot, acls_df, batchsize, max_query
+            )
         except asyncio.TimeoutError:
             print(f"Timeout error, retrying in {2 ** retry} seconds...")
             await asyncio.sleep(2**retry)
@@ -752,14 +784,22 @@ async def nqe_get_hosts_by_port_2(appserver, snapshot):
 
         if response_status == 200:
             response_json = json.loads(response_text)
-            return response_json['items']
+            print(f"Finished Hosts Details...")
+            return response_json["items"]
         else:
             raise Exception(f"Error: {response_status} {response_text}")
 
 
-async def search_subnet(appserver, snapshot, addresses):
+async def search_subnet(appserver, snapshot, dataframe):
     result_list = []  # List to store the response JSON for each address
     async with aiohttp.ClientSession() as session:
+        addresses = []
+        for row in dataframe.itertuples():
+            addresses.extend(row.sources)
+            addresses.extend(row.destinations)
+        addresses = list(set(addresses))  # remove duplicates
+
+        
         for address in addresses:
             url = f"https://{appserver}/api/snapshots/{snapshot}/subnets"
             params = {"address": address, "minimal": "true"}
@@ -781,6 +821,9 @@ async def search_subnet(appserver, snapshot, addresses):
                 response_json = json.loads(response_text)
                 response_json["address"] = address
                 result_list.append(response_json)
+            elif response_status == 403:
+                print("Warning: Status 403. Please set FWD_USER and FWD_PASSWORD.")
+                sys.exit(1)
             else:
                 raise Exception(f"Error: {response_status}")
 
@@ -788,11 +831,16 @@ async def search_subnet(appserver, snapshot, addresses):
     df = pd.DataFrame(parsed_data)
     return df
 
-async def gather_results(appserver, snapshot, acls_df, batchsize, max_query, retries):
+
+async def gather_results(
+    appserver, snapshot, acls_df, batchsize, max_query, retries, address_df=None
+):
     try:
         results = await asyncio.gather(
             nqe_get_hosts_by_port_2(appserver, snapshot),
-            process_input(appserver, snapshot, acls_df, batchsize, max_query),
+            process_input(
+                appserver, snapshot, acls_df, batchsize, max_query, address_df
+            ),
         )
         return results
     except Exception as e:
@@ -807,58 +855,83 @@ async def gather_results(appserver, snapshot, acls_df, batchsize, max_query, ret
         return None
 
 
-def main():
-    arguments = docopt(__doc__)
-    global debug
-    debug = arguments["--debug"]
-    print(f"Debug: {debug}")
-    retries = 3
-    logging.basicConfig(filename="fwd-intent-gen.log", level=logging.INFO)
+def from_import(
+    appserver, snapshot, infile, batchsize, limit, max_query, retries, with_diag
+):
+    print(f"Setting batch size: {batchsize}")
+    print(f"Setting limit: {limit}")
+    print(f"Setting max querys: {max_query}")
+    report = f"intent-gen-{snapshot}.xlsx"
 
-    if arguments["from_import"]:
-        print("Running: from_import")
-        infile = arguments["<input>"]
-        appserver = arguments["<appserver>"]
-        snapshot = arguments["<snapshot>"]
-        queryId = arguments["<queryId>"]
-        batchsize = int(arguments["--batch"])
-        print(f"Setting batch size: {batchsize}")
+    test_communication(appserver)
+    
+    if debug:
+        pd.set_option("display.max_rows", None)  # Show all rows
 
-        with open(infile) as file:
-            data = json.load(file)
+    with open(infile) as file:
+        data = json.load(file)
 
-        df = pd.DataFrame(data)
+    app_df = flatten_input(data)
+    address_df = asyncio.run(search_subnet(appserver, snapshot, app_df))
 
-        report = f"intent-gen-{snapshot}.xlsx"
+
+    try:
+        app_df.sort_values(by="application")
+
+        # Fix list
+        for column in app_df.columns:
+            if app_df[column].apply(lambda x: isinstance(x, list)).any():
+                app_df[column] = app_df[column].apply(tuple)
+
+        app_df.drop_duplicates(inplace=True)
+        print(f"APP Entries Found: {len(app_df)}\n")
+
+        # add limiter for testing
+        if limit:
+            app_df = app_df.head(limit)
+
         if debug:
-            pd.set_option("display.max_rows", None)  # Show all rows
+            print(app_df)
 
-        addresses = search_address(data)
-        address_df = search_subnet(appserver, snapshot, addresses)
+        import datetime
 
+        start_time = datetime.datetime.now()
+        print(f"Start time: {start_time}")
+        logging.info(f"Start time: {start_time}")
         try:
-            intent = asyncio.run(
-                process_input(appserver, snapshot, df, address_df, batchsize)
+            results = asyncio.run(
+                gather_results(
+                    appserver,
+                    snapshot,
+                    app_df,
+                    batchsize,
+                    max_query,
+                    retries,
+                    address_df,
+                )
             )
-        except Exception as e:
-            print(f"Error occurred while processing input: {e}")
-            return
+            if results is not None:
+                hosts = results[0]
+                intent = results[1]
+        except KeyboardInterrupt:
+            print("Interrupted by user, continuing without finishing...")
+            pass
+
+        print(f"End time: {datetime.datetime.now()}")
+
+        logging.info(f"End time: {datetime.datetime.now()}")
 
         forwarding_outcomes = addForwardingOutcomes(intent)
         updatedf = return_firstlast_hop(forwarding_outcomes)
 
-        host_addresses = []
-        mac_addresses = []
-        ouis = []
-        host_interfaces = []
-
-        get_all_hosts = asyncio.run(nqe_get_hosts_by_port_2(appserver, snapshot))
+        # print(f"DEBUG: {hosts}")
 
         for index, row in updatedf.iterrows():
-            device = row.get("lastHopDevice", None)
-            interface = row.get("lastHopEgressIntf", None)
-            forwardingOutcome = row["forwardingOutcome"]
+            device = updatedf.at[index, "lastHopDevice"]
+            interface = updatedf.at[index, "lastHopEgressIntf"]
+            forwardingOutcome = updatedf.at[index, "forwardingOutcome"]
             outcomes = ["DELIVERED", "NOT_DELIVERED"]
+
             if (
                 device
                 and forwardingOutcome
@@ -866,23 +939,21 @@ def main():
                 and forwardingOutcome not in outcomes
                 and not bool(re.match(r"^self\..*", interface))
             ):
-                hosts = get_all_hosts
-                host_addresses.append(hosts["Address"])
-                mac_addresses.append(hosts["MacAddress"])
-                ouis.append(hosts["OUI"])
-                host_interfaces.append(hosts["Interface"])
-                if debug:
-                    print(f"DEBUG: main\n Hosts: {hosts}")
-            else:
-                host_addresses.append(None)
-                mac_addresses.append(None)
-                ouis.append(None)
-                host_interfaces.append(None)
+                for host in hosts:
+                    if host["deviceName"] == device and host["Interface"] == interface:
+                        updatedf.at[index, "hostAddress"] = host.get("Address", None)
+                        updatedf.at[index, "MacAddress"] = host.get("MacAddress", None)
+                        updatedf.at[index, "OUI"] = host.get("OUI", None)
+                        updatedf.at[index, "hostInterface"] = host.get(
+                            "Interface", None
+                        )
+                        break
 
-        updatedf["hostAddress"] = host_addresses
-        updatedf["MacAddress"] = mac_addresses
-        updatedf["OUI"] = ouis
-        updatedf["hostInterface"] = host_interfaces
+            else:
+                updatedf.at[index, "hostAddress"] = None
+                updatedf.at[index, "MacAddress"] = None
+                updatedf.at[index, "OUI"] = None
+                updatedf.at[index, "hostInterface"] = None
 
         columns_to_display = [
             "region",
@@ -900,10 +971,8 @@ def main():
             "returnPathCount",
             "returnHops",
             "firstHopDevice",
-            # "firstHopDeviceType",
             "lastHopDevice",
             "lastHopEgressIntf",
-            # "lastHopDeviceType",
             "hostAddress",
             "MacAddress",
             "OUI",
@@ -911,199 +980,256 @@ def main():
         ]
 
         print(updatedf[columns_to_display])
-        updatedf[
-            columns_to_display
-            + [
-                "queryUrl",
-                "forwardDescription",
-                "forwardRemedy",
-                "securityDescription",
-                "securityRemedy",
-            ]
-        ].to_excel(report, index=True)
+
+        if with_diag:
+            updatedf[
+                columns_to_display
+                + [
+                    "queryUrl",
+                    "forwardDescription",
+                    "forwardRemedy",
+                    "securityDescription",
+                    "securityRemedy",
+                ]
+            ].to_excel(report, index=True)
+        else:
+            updatedf[
+                columns_to_display
+                + [
+                    "queryUrl",
+                ]
+            ].to_excel(report, index=True)
         update_font(report)
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        print(traceback.format_exc())
+
+        logging.error(f"An error occurred: {e}")
+        logging.error(traceback.format_exc())
+
+        return
+
+
+def from_hosts(appserver, snapshot, batchsize, limit, max_query, retries, with_diag=False):
+    print(f"Setting batch size: {batchsize}")
+    print(f"Setting limit: {limit}")
+    print(f"Setting max querys: {max_query}")
+
+    report = f"intent-gen-{snapshot}.xlsx"
+    if debug:
+        pd.set_option("display.max_rows", None)  # Show all rows
+
+    try:
+        # Retrieve all possible ACLs where a source or destination is locatable in the model
+        test_communication(appserver)
+        data = nqe_get_hosts_from_acl(acl_query, appserver, snapshot)
+        acls_df = pd.DataFrame(data)
+        if len(acls_df) == 0:
+            print("No ACL names found")
+            return
+
+        if debug:
+            print(acls_df)
+
+        acls_df.sort_values(by="application")
+
+        # Add region to conform to input specification
+        acls_df["region"] = "Default"
+
+        # Fixup port ranges from input
+        acls_df["dstPorts"] = acls_df["dstPorts"].apply(parse_start_end)
+        acls_df["protocols"] = acls_df["protocols"].apply(parse_start_end)
+
+        # Fix list
+        for column in acls_df.columns:
+            if acls_df[column].apply(lambda x: isinstance(x, list)).any():
+                acls_df[column] = acls_df[column].apply(tuple)
+
+        acls_df.drop_duplicates(inplace=True)
+        print(f"ACL Entries Found: {len(acls_df)}\n")
+
+        # add limiter for testing
+        if limit:
+            acls_df = acls_df.head(limit)
+
+        if debug:
+            print(acls_df)
+
+        import datetime
+
+        start_time = datetime.datetime.now()
+        print(f"Start time: {start_time}")
+        logging.info(f"Start time: {start_time}")
+        try:
+            results = asyncio.run(
+                gather_results(
+                    appserver, snapshot, acls_df, batchsize, max_query, retries
+                )
+            )
+            if results is not None:
+                hosts = results[0]
+                intent = results[1]
+        except KeyboardInterrupt:
+            print("Interrupted by user, continuing without finishing...")
+            pass
+
+        print(f"End time: {datetime.datetime.now()}")
+
+        logging.info(f"End time: {datetime.datetime.now()}")
+
+        forwarding_outcomes = addForwardingOutcomes(intent)
+        updatedf = return_firstlast_hop(forwarding_outcomes)
+
+        # print(f"DEBUG: {hosts}")
+
+        for index, row in updatedf.iterrows():
+            device = updatedf.at[index, "lastHopDevice"]
+            interface = updatedf.at[index, "lastHopEgressIntf"]
+            forwardingOutcome = updatedf.at[index, "forwardingOutcome"]
+            outcomes = ["DELIVERED", "NOT_DELIVERED"]
+
+            if (
+                device
+                and forwardingOutcome
+                and interface
+                and forwardingOutcome not in outcomes
+                and not bool(re.match(r"^self\..*", interface))
+            ):
+                for host in hosts:
+                    if host["deviceName"] == device and host["Interface"] == interface:
+                        updatedf.at[index, "hostAddress"] = host.get("Address", None)
+                        updatedf.at[index, "MacAddress"] = host.get("MacAddress", None)
+                        updatedf.at[index, "OUI"] = host.get("OUI", None)
+                        updatedf.at[index, "hostInterface"] = host.get(
+                            "Interface", None
+                        )
+                        break
+
+            else:
+                updatedf.at[index, "hostAddress"] = None
+                updatedf.at[index, "MacAddress"] = None
+                updatedf.at[index, "OUI"] = None
+                updatedf.at[index, "hostInterface"] = None
+
+        columns_to_display = [
+            "region",
+            "application",
+            "srcIp",
+            "dstIp",
+            "ipProto",
+            "dstPort",
+            "forwardingOutcome",
+            "securityOutcome",
+            "srcIpLocationType",
+            "dstIpLocationType",
+            "pathCount",
+            "forwardHops",
+            "returnPathCount",
+            "returnHops",
+            "firstHopDevice",
+            "lastHopDevice",
+            "lastHopEgressIntf",
+            "hostAddress",
+            "MacAddress",
+            "OUI",
+            "hostInterface",
+        ]
+
+        print(updatedf[columns_to_display])
+
+        if with_diag:
+            updatedf[
+                columns_to_display
+                + [
+                    "queryUrl",
+                    "forwardDescription",
+                    "forwardRemedy",
+                    "securityDescription",
+                    "securityRemedy",
+                ]
+            ].to_excel(report, index=True)
+        else:
+            updatedf[
+                columns_to_display
+                + [
+                    "queryUrl",
+                ]
+            ].to_excel(report, index=True)
+        update_font(report)
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        print(traceback.format_exc())
+
+        logging.error(f"An error occurred: {e}")
+        logging.error(traceback.format_exc())
+
+        return
+
+
+def check(appserver, snapshot, infile, csv):
+    report = f"errored-devices-{snapshot}.csv"
+    with open(infile) as file:
+        data = json.load(file)
+
+    addresses = search_address(data)
+    try:
+        address_df = search_subnet(appserver, snapshot, addresses)
+    except Exception as e:
+        print(f"Error occurred while searching subnet: {e}")
+        return
+
+    try:
+        errored_devices = error_queries(data, address_df)
+    except Exception as e:
+        print(f"Error occurred while querying errors: {e}")
+        return
+
+    if csv:
+        errored_devices.loc[:, ["address", "hostname"]].to_csv(report, index=False)
+
+
+def main():
+    arguments = docopt(__doc__)
+    global debug
+    debug = arguments["--debug"]
+    print(f"Debug: {debug}")
+    retries = 3
+    logging.basicConfig(filename="fwd-intent-gen.log", level=logging.INFO)
+
+    if arguments["from_import"]:
+        print("Running: from_import")
+        infile = arguments["<input>"]
+        appserver = arguments["<appserver>"]
+        snapshot = arguments["<snapshot>"]
+        batchsize = int(arguments["--batch"])
+        limit = int(arguments["--limit"])
+        max_query = int(arguments["--max"])
+        with_diag = arguments["--withdiag"]
+
+        from_import(
+            appserver, snapshot, infile, batchsize, limit, max_query, retries, with_diag
+        )
 
     elif arguments["check"]:
         print("Running: Check")
         infile = arguments["<input>"]
         appserver = arguments["<appserver>"]
         snapshot = arguments["<snapshot>"]
-        report = f"errored-devices-{snapshot}.csv"
+        csv = arguments["--csv"]
 
-        with open(infile) as file:
-            data = json.load(file)
-
-        addresses = search_address(data)
-        try:
-            address_df = search_subnet(appserver, snapshot, addresses)
-        except Exception as e:
-            print(f"Error occurred while searching subnet: {e}")
-            return
-
-        try:
-            errored_devices = error_queries(data, address_df)
-        except Exception as e:
-            print(f"Error occurred while querying errors: {e}")
-            return
-
-        if arguments["--csv"]:
-            errored_devices.loc[:, ["address", "hostname"]].to_csv(report, index=False)
+        check(appserver, snapshot, infile, csv)
 
     elif arguments["from_hosts"]:
         print("Running: from_hosts")
         appserver = arguments["<appserver>"]
         snapshot = arguments["<snapshot>"]
-
-        appserver = arguments["<appserver>"]
-        snapshot = arguments["<snapshot>"]
         batchsize = int(arguments["--batch"])
         limit = int(arguments["--limit"])
         max_query = int(arguments["--max"])
-        print(f"Setting batch size: {batchsize}")
-        print(f"Setting limit: {limit}")
-        print(f"Setting max querys: {max_query}")
-
-        report = f"intent-gen-{snapshot}.xlsx"
-        if debug:
-            pd.set_option("display.max_rows", None)  # Show all rows
-
-        try:
-            # Retrieve all possible ACLs where a source or destination is locatable in the model
-            data = nqe_get_hosts_from_acl(acl_query, appserver, snapshot)
-            acls_df = pd.DataFrame(data)
-            if len(acls_df) == 0:
-                print("No ACL names found")
-                return
-
-            if debug:
-                print(acls_df)
-
-            acls_df.sort_values(by="application")
-
-            # Add region to conform to input specification
-            acls_df["region"] = "Default"
-
-            # Fixup port ranges from input
-            acls_df["dstPorts"] = acls_df["dstPorts"].apply(parse_start_end)
-            acls_df["protocols"] = acls_df["protocols"].apply(parse_start_end)
-
-            # Fix list
-            for column in acls_df.columns:
-                if acls_df[column].apply(lambda x: isinstance(x, list)).any():
-                    acls_df[column] = acls_df[column].apply(tuple)
-
-            acls_df.drop_duplicates(inplace=True)
-            print(f"ACL Entries Found: {len(acls_df)}\n")
-
-            # add limiter for testing
-            if limit:
-                acls_df = acls_df.head(limit)
-
-            if debug:
-                print(acls_df)
-
-            import datetime
-
-            start_time = datetime.datetime.now()
-            print(f"Start time: {start_time}")
-            logging.info(f"Start time: {start_time}")
-            try:
-                results = asyncio.run(
-                    gather_results(appserver, snapshot, acls_df, batchsize, max_query, retries)
-                )
-                if results is not None:
-                    hosts = results[0]
-                    intent = results[1]
-            except KeyboardInterrupt:
-                print("Interrupted by user, continuing without finishing...")
-                pass
-
-            print(f"End time: {datetime.datetime.now()}")
-
-            logging.info(f"End time: {datetime.datetime.now()}")
-
-            forwarding_outcomes = addForwardingOutcomes(intent)
-            updatedf = return_firstlast_hop(forwarding_outcomes)
-
-            for index, row in updatedf.iterrows():
-                device = updatedf.at[index, "lastHopDevice"]
-                interface = updatedf.at[index, "lastHopEgressIntf"]
-                forwardingOutcome = updatedf.at[index, "forwardingOutcome"]
-                outcomes = ["DELIVERED", "NOT_DELIVERED"]
-
-                if (
-                    device
-                    and forwardingOutcome
-                    and interface
-                    and forwardingOutcome not in outcomes
-                    and not bool(re.match(r"^self\..*", interface))
-                ):
-                    hosts
-                    if hosts:
-                        updatedf.at[index, "hostAddress"] = hosts[0].get( "Address", None)
-                        updatedf.at[index, "MacAddress"] = hosts[0].get( "MacAddress", None)
-                        updatedf.at[index, "OUI"] = hosts[0].get("OUI", None)
-                        updatedf.at[index, "hostInterface"] = hosts[0].get("Interface", None)
-                else:
-                        updatedf.at[index, "hostAddress"] = None
-                        updatedf.at[index, "MacAddress"] = None
-                        updatedf.at[index, "OUI"] = None
-                        updatedf.at[index, "hostInterface"] = None
-
-            columns_to_display = [
-                "region",
-                "application",
-                "srcIp",
-                "dstIp",
-                "ipProto",
-                "dstPort",
-                "forwardingOutcome",
-                "securityOutcome",
-                "srcIpLocationType",
-                "dstIpLocationType",
-                "pathCount",
-                "forwardHops",
-                "returnPathCount",
-                "returnHops",
-                "firstHopDevice",
-                "lastHopDevice",
-                "lastHopEgressIntf",
-                "hostAddress",
-                "MacAddress",
-                "OUI",
-                "hostInterface",
-            ]
-
-            print(updatedf[columns_to_display])
-
-            if arguments["--withdiag"]:
-                updatedf[
-                    columns_to_display
-                    + [
-                        "queryUrl",
-                        "forwardDescription",
-                        "forwardRemedy",
-                        "securityDescription",
-                        "securityRemedy",
-                    ]
-                ].to_excel(report, index=True)
-            else:
-                updatedf[
-                    columns_to_display
-                    + [
-                        "queryUrl",
-                    ]
-                ].to_excel(report, index=True)
-            update_font(report)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            print(traceback.format_exc())
-
-            logging.error(f"An error occurred: {e}")
-            logging.error(traceback.format_exc())
-
-            return
+        with_diag = arguments["--withdiag"]
+        from_hosts(appserver, snapshot, batchsize, limit, max_query, retries, with_diag)
 
     else:
         print(

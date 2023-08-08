@@ -3,9 +3,9 @@
 
 ```
 Usage:
-  fwd-intent-gen.py from_import <appserver> <input> <snapshot>  [--batch=<batch_size>] [--withdiag] [--debug]
+  fwd-intent-gen.py from_import <input> <appserver> <snapshot> [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
   fwd-intent-gen.py from_hosts <appserver> <snapshot>   [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
-  fwd-intent-gen.py check <appserver> <input> <snapshot> [--csv] [--debug]
+  fwd-intent-gen.py check <input> <appserver> <snapshot> [--csv] [--debug]
 
 Options:
   -h --help             Show this help message
@@ -31,18 +31,18 @@ FWD_PASSWORD
 
 Check of addresses belong to a known HOST or device INTERFACE
 
-`python fwd-intent-gen.py check fwd.app input.json 627174`
+`python fwd-intent-gen.py check input.json fwd.app 627174`
 
 Dump errors to csv file for import into collection
 
-`python fwd-intent-gen.py check fwd.app input.json 627174 --csv`
+`python fwd-intent-gen.py check input.json fwd.app 627174 --csv`
 
 
 ### from_import
 
 Execute all checks, results are placed into an .xlsx file called `intent-gen-<snapshot>.xlsx`
 
-`python fwd-intent-gen.py from_import fwd.app input.json 627174`
+`python fwd-intent-gen.py from_import input.json fwd.app 627174`
 
 
 ### from_hosts
