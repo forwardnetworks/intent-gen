@@ -655,19 +655,6 @@ def search_address(input):
         for a in value
     }
     return addresses
-    # for region, region_value in input.items():
-    #     for service, service_value in region_value.items():
-    #         if isinstance(service_value, dict):
-    #             filtered_values = {
-    #                 key: value
-    #                 for key, value in service_value.items()
-    #                 if key in ["source", "destination"]
-    #             }
-    #             for key, value in filtered_values.items():
-    #                 for a in value:
-    #                     addresses.add(a)
-    # return addresses
-
 
 async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
     async with aiohttp.ClientSession() as session:
@@ -1170,12 +1157,20 @@ def from_hosts(appserver, snapshot, batchsize, limit, max_query, retries, with_d
 
 def check(appserver, snapshot, infile, csv):
     report = f"errored-devices-{snapshot}.csv"
+
+    test_communication(appserver)
+    
+    if debug:
+        pd.set_option("display.max_rows", None)  # Show all rows
+
     with open(infile) as file:
         data = json.load(file)
 
-    addresses = search_address(data)
+    app_df = flatten_input(data)
+    address_df = asyncio.run(search_subnet(appserver, snapshot, app_df))
+
     try:
-        address_df = search_subnet(appserver, snapshot, addresses)
+         address_df = asyncio.run(search_subnet(appserver, snapshot, app_df))
     except Exception as e:
         print(f"Error occurred while searching subnet: {e}")
         return
