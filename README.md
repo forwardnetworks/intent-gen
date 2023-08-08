@@ -18,6 +18,10 @@ Options:
 
 ## Setup
 
+Install dependencies (use a virtualenv)
+
+`pip install -r requirements.txt `   
+
 ### Credentials: 
 
 The following environmental variables need to be set to local user accounts or API-Token
