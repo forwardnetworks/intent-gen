@@ -28,7 +28,8 @@ from openpyxl.styles import Font
 from openpyxl import load_workbook
 import requests
 import logging
-
+import glob
+import datetime
 from tqdm import tqdm
 
 import urllib3
@@ -167,13 +168,15 @@ headers = {
 
 # Utilities
 
+
 def test_communication(appserver):
-        try:
-            response = requests.get(f"https://{appserver}", timeout=10)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            print(f"HTTP communication failed with {appserver}.")
-            sys.exit(1)
+    try:
+        response = requests.get(f"https://{appserver}", timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"HTTP communication failed with {appserver}.")
+        sys.exit(1)
+
 
 def flatten_input(data):
     rows = []
@@ -191,7 +194,14 @@ def flatten_input(data):
             )
     return pd.DataFrame(
         rows,
-        columns=["region", "application", "sources", "destinations", "protocols", "dstPorts"],
+        columns=[
+            "region",
+            "application",
+            "sources",
+            "destinations",
+            "protocols",
+            "dstPorts",
+        ],
     )
 
 
@@ -244,10 +254,7 @@ def resolve_ip_to_domain(ip_address):
 
 def nqe_get_hosts_from_acl(query, appserver, snapshot):
     url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
-    body = {
-        "query": query,
-        "queryOptions": {"limit": 10000}
-    }
+    body = {"query": query, "queryOptions": {"limit": 10000}}
 
     response = requests.post(
         url, json=body, auth=(username, password), headers=headers, verify=False
@@ -284,7 +291,6 @@ if not username or not password:
 
 def return_firstlast_hop(df):
     new_df = df.copy()
-
     # Extract values using apply()
     (
         new_df["firstHopDevice"],
@@ -301,7 +307,7 @@ def return_firstlast_hop(df):
                 hops[-1]["deviceType"],
                 hops[-1].get("egressInterface"),
             )
-            if len(hops) > 0
+            if isinstance(hops, list) and len(hops) > 0
             else (None, None, None, None, None)
         )
     )
@@ -524,7 +530,6 @@ async def process_input(
     async with aiohttp.ClientSession() as session:
         dfs = []  # List to store individual dataframes
         for index, row in input_df.iterrows():
-
             region = row["region"]
             sources = row["sources"]
             destinations = row["destinations"]
@@ -641,6 +646,8 @@ async def process_input(
                         paths_df, query_list_df, left_index=True, right_index=True
                     )
                     dfs.append(merged_df)
+                    # Persist the dataframe to a file after each iteration
+                    merged_df.to_csv(f"./cache/intent_{index}.csv", index=False)
     if len(dfs) > 0:
         return pd.concat(dfs, ignore_index=True)
 
@@ -657,6 +664,7 @@ def search_address(input):
     }
     return addresses
 
+
 async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
     async with aiohttp.ClientSession() as session:
         url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
@@ -667,7 +675,7 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
                     {"columnName": "deviceName", "value": device},
                     {"columnName": "Interface", "value": port},
                 ],
-                "limit": 10000
+                "limit": 10000,
             },
         }
         try:
@@ -757,8 +765,7 @@ async def nqe_get_hosts_by_port_2(appserver, snapshot):
     print(f"Gathering Hosts Details...")
     async with aiohttp.ClientSession() as session:
         url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
-        body = {"query": host_query,
-                "queryOptions": {"limit": 10000}}
+        body = {"query": host_query, "queryOptions": {"limit": 10000}}
         try:
             response_text, response_status = await fetch(
                 session,
@@ -774,10 +781,12 @@ async def nqe_get_hosts_by_port_2(appserver, snapshot):
 
         if response_status == 200:
             response_json = json.loads(response_text)
-            print(f"Finished Hosts Details...")
+            df = pd.DataFrame(response_json["items"])
+            df.to_csv('./cache/hosts.csv')
             return response_json["items"]
         else:
             raise Exception(f"Error: {response_status} {response_text}")
+
 
 
 async def search_subnet(appserver, snapshot, dataframe):
@@ -789,7 +798,6 @@ async def search_subnet(appserver, snapshot, dataframe):
             addresses.extend(row.destinations)
         addresses = list(set(addresses))  # remove duplicates
 
-        
         for address in addresses:
             url = f"https://{appserver}/api/snapshots/{snapshot}/subnets"
             params = {"address": address, "minimal": "true"}
@@ -836,13 +844,8 @@ async def gather_results(
     except Exception as e:
         print(f"Error occurred: {e}")
         logging.error(f"Error occurred: {e}")
-        return None
-    except asyncio.TimeoutError:
-        print("Request timed out. Retrying...")
-        return await gather_results(appserver, snapshot, acls_df, batchsize, retries)
-    except:
-        print("An unexpected error occurred.")
-        return None
+        raise
+
 
 
 def from_import(
@@ -854,7 +857,7 @@ def from_import(
     report = f"intent-gen-{snapshot}.xlsx"
 
     test_communication(appserver)
-    
+
     if debug:
         pd.set_option("display.max_rows", None)  # Show all rows
 
@@ -863,7 +866,6 @@ def from_import(
 
     app_df = flatten_input(data)
     address_df = asyncio.run(search_subnet(appserver, snapshot, app_df))
-
 
     try:
         app_df.sort_values(by="application")
@@ -903,9 +905,9 @@ def from_import(
             if results is not None:
                 hosts = results[0]
                 intent = results[1]
-        except KeyboardInterrupt:
-            print("Interrupted by user, continuing without finishing...")
-            pass
+        except Exception as e:
+            logging.error(f"An error occurred: {e}")
+            raise e
 
         print(f"End time: {datetime.datetime.now()}")
 
@@ -1001,7 +1003,9 @@ def from_import(
         return
 
 
-def from_hosts(appserver, snapshot, batchsize, limit, max_query, retries, with_diag=False):
+def from_hosts(
+    appserver, snapshot, batchsize, limit, max_query, retries, with_diag=False
+):
     print(f"Setting batch size: {batchsize}")
     print(f"Setting limit: {limit}")
     print(f"Setting max querys: {max_query}")
@@ -1046,8 +1050,6 @@ def from_hosts(appserver, snapshot, batchsize, limit, max_query, retries, with_d
         if debug:
             print(acls_df)
 
-        import datetime
-
         start_time = datetime.datetime.now()
         print(f"Start time: {start_time}")
         logging.info(f"Start time: {start_time}")
@@ -1061,12 +1063,20 @@ def from_hosts(appserver, snapshot, batchsize, limit, max_query, retries, with_d
                 hosts = results[0]
                 intent = results[1]
         except KeyboardInterrupt:
-            print("Interrupted by user, continuing without finishing...")
-            pass
+            print("Interrupted by user, continuing with available data...")
+            # Get a list of all the csv files
+            hosts = pd.read_csv('./cache/hosts.csv')
+            csv_files = glob.glob("./cache/intent_*.csv")
+            intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+        except asyncio.TimeoutError:
+            print("Operation timed out. Recovering from the persisted dataframe...")
+            csv_files = glob.glob("./cache/intent_*.csv")
+            intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+        except:
+            raise
 
-        print(f"End time: {datetime.datetime.now()}")
-
-        logging.info(f"End time: {datetime.datetime.now()}")
+        print(f"Collection End: {datetime.datetime.now()}")
+        logging.info(f"Collection End: {datetime.datetime.now()}")
 
         forwarding_outcomes = addForwardingOutcomes(intent)
         updatedf = return_firstlast_hop(forwarding_outcomes)
@@ -1149,11 +1159,12 @@ def from_hosts(appserver, snapshot, batchsize, limit, max_query, retries, with_d
         update_font(report)
 
     except Exception as e:
-        print(f"An error occurred: {e}")
-        print(traceback.format_exc())
+        raise
+        # print(f"An error occurred: {e}")
+        # print(traceback.format_exc())
 
-        logging.error(f"An error occurred: {e}")
-        logging.error(traceback.format_exc())
+        # logging.error(f"An error occurred: {e}")
+        # logging.error(traceback.format_exc())
 
         return
 
@@ -1162,7 +1173,7 @@ def check(appserver, snapshot, infile, csv):
     report = f"errored-devices-{snapshot}.csv"
 
     test_communication(appserver)
-    
+
     if debug:
         pd.set_option("display.max_rows", None)  # Show all rows
 
@@ -1173,7 +1184,7 @@ def check(appserver, snapshot, infile, csv):
     address_df = asyncio.run(search_subnet(appserver, snapshot, app_df))
 
     try:
-         address_df = asyncio.run(search_subnet(appserver, snapshot, app_df))
+        address_df = asyncio.run(search_subnet(appserver, snapshot, app_df))
     except Exception as e:
         print(f"Error occurred while searching subnet: {e}")
         return
@@ -1195,6 +1206,8 @@ def main():
     print(f"Debug: {debug}")
     retries = 3
     logging.basicConfig(filename="fwd-intent-gen.log", level=logging.INFO)
+    if not os.path.exists("./cache"):
+        os.makedirs("./cache")
 
     if arguments["from_import"]:
         print("Running: from_import")
