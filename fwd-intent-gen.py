@@ -246,6 +246,7 @@ def nqe_get_hosts_from_acl(query, appserver, snapshot):
     url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
     body = {
         "query": query,
+        "queryOptions": {"limit": 10000}
     }
 
     response = requests.post(
@@ -666,6 +667,7 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
                     {"columnName": "deviceName", "value": device},
                     {"columnName": "Interface", "value": port},
                 ],
+                "limit": 10000
             },
         }
         try:
@@ -713,49 +715,50 @@ async def run_process_input(
                 continue
 
 
-async def nqe_get_hosts_by_port_1(appserver, snapshot, device, port):
-    print(f"This may take a while... {device}  {port}")
-    async with aiohttp.ClientSession() as session:
-        url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
-        body = {
-            "query": host_query,
-            "queryOptions": {
-                "columnFilters": [
-                    {"columnName": "deviceName", "value": device},
-                    {"columnName": "Interface", "value": port},
-                ],
-            },
-        }
-        try:
-            response_text, response_status = await fetch(
-                session,
-                url,
-                body,
-                method="POST",
-                username=username,
-                password=password,
-                headers=headers,
-            )
-        except asyncio.exceptions.TimeoutError:
-            print("Request timed out. Retrying...")
-            return await nqe_get_hosts_by_port_1(appserver, snapshot, device, port)
+# async def nqe_get_hosts_by_port_1(appserver, snapshot, device, port):
+#     print(f"This may take a while... {device}  {port}")
+#     async with aiohttp.ClientSession() as session:
+#         url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
+#         body = {
+#             "query": host_query,
+#             "queryOptions": {
+#                 "columnFilters": [
+#                     {"columnName": "deviceName", "value": device},
+#                     {"columnName": "Interface", "value": port},
+#                 ],
+#             },
+#         }
+#         try:
+#             response_text, response_status = await fetch(
+#                 session,
+#                 url,
+#                 body,
+#                 method="POST",
+#                 username=username,
+#                 password=password,
+#                 headers=headers,
+#             )
+#         except asyncio.exceptions.TimeoutError:
+#             print("Request timed out. Retrying...")
+#             return await nqe_get_hosts_by_port_1(appserver, snapshot, device, port)
 
-        if response_status == 200:
-            response_json = json.loads(response_text)
-            return response_json["items"]
-        elif response_status in [401, 403]:
-            print("Authentication failed. Please check your credentials.")
-            return None
-        else:
-            print(f"Error: {response_status} {response_text}")
-            return None
+#         if response_status == 200:
+#             response_json = json.loads(response_text)
+#             return response_json["items"]
+#         elif response_status in [401, 403]:
+#             print("Authentication failed. Please check your credentials.")
+#             return None
+#         else:
+#             print(f"Error: {response_status} {response_text}")
+#             return None
 
 
 async def nqe_get_hosts_by_port_2(appserver, snapshot):
     print(f"Gathering Hosts Details...")
     async with aiohttp.ClientSession() as session:
         url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
-        body = {"query": host_query}
+        body = {"query": host_query,
+                "queryOptions": {"limit": 10000}}
         try:
             response_text, response_status = await fetch(
                 session,
