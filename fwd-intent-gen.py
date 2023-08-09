@@ -1,3 +1,44 @@
+#     ______                                         __
+#    / ____/____   _____ _      __ ____ _ _____ ____/ /
+#   / /_   / __ \ / ___/| | /| / // __ `// ___// __  /
+#  / __/  / /_/ // /    | |/ |/ // /_/ // /   / /_/ /
+# /_/ _   \____//_/__   |__/|__/ \__,_//_/    \__,_/
+#    / | / /___   / /_ _      __ ____   _____ / /__ _____
+#   /  |/ // _ \ / __/| | /| / // __ \ / ___// //_// ___/
+#  / /|  //  __// /_  | |/ |/ // /_/ // /   / ,<  (__  )
+# /_/ |_/ \___/ \__/  |__/|__/ \____//_/   /_/|_|/____/
+
+# Discalimer:
+
+# This software is provided as is, without any warranty or support. Use of the software is at your own risk. 
+# The author and any contributors will not be held responsible for any damages or issues that may arise from 
+# the use of this software.
+
+# Please be aware that this software may contain bugs, errors, or other issues. 
+# It may not function as intended or be fit for your specific use case.
+
+# By using this software, you acknowledge and accept the above disclaimer and assume 
+# all responsibility for any issues that may arise from its use. 
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Copyright 2023 Forward Networks, Inc.
+# All rights reserved.
+
+
+
+
+
 """
 Usage:
   fwd-intent-gen.py from_import <input> <appserver> <snapshot> [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
