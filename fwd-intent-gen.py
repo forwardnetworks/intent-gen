@@ -620,9 +620,9 @@ async def process_input(
                     merged_df = pd.merge(
                         paths_df, query_list_df, left_index=True, right_index=True
                     )
+                    merged_df.to_csv(f"./cache/intent_{index}_{i}.csv", index=False)
                     dfs.append(merged_df)
-                    # Persist the dataframe to a file after each iteration
-                    merged_df.to_csv(f"./cache/intent_{index}.csv", index=False)
+
     if len(dfs) > 0:
         return pd.concat(dfs, ignore_index=True)
 
@@ -1087,7 +1087,6 @@ def main():
 
         else:
             csv_files = glob.glob("./cache/intent_*.csv")
-            print(csv_files)
             intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
             print(f"Total rows in intent: {len(intent)}")
 
