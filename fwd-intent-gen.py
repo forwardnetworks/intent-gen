@@ -319,39 +319,14 @@ def return_firstlast_hop(df):
 
 
 def addForwardingOutcomes(result):
-    result_df = pd.DataFrame(result)
 
-    # Add new columns to the DataFrame
-    # Initialize new columns in the DataFrame with empty strings
-    result_df["forwardDescription"] = ""
-    result_df["forwardRemedy"] = ""
-    result_df["securityDescription"] = ""
-    result_df["securityRemedy"] = ""
+    result['forwardingDescription'] = result['forwardingOutcome'].apply(lambda x: forwardingOutcomes[x]["description"] if x in forwardingOutcomes else None)
+    result['forwardingRemedy'] = result['forwardingOutcome'].apply(lambda x: forwardingOutcomes[x]["remedy"] if x in forwardingOutcomes else None)
+    result['securityDescription'] = result['securityOutcome'].apply(lambda x: securityOutcomes[x]["description"] if x in securityOutcomes else None)
+    result['securityRemedy'] = result['securityOutcome'].apply(lambda x: securityOutcomes[x]["remedy"] if x in securityOutcomes else None)
 
-    # Use apply function to vectorize the operations instead of looping through each row
-    # For each forwardingOutcome, get the corresponding description and remedy from the forwardingOutcomes dictionary
-    # If the forwardingOutcome is not in the dictionary, fill the columns with None
-    result_df[["forwardDescription", "forwardRemedy"]] = result_df[
-        "forwardingOutcome"
-    ].apply(
-        lambda x: pd.Series(
-            [forwardingOutcomes[x]["description"], forwardingOutcomes[x]["remedy"]]
-        )
-        if x in forwardingOutcomes
-        else pd.Series([None, None])
-    )
+    return result
 
-    # Do the same for securityOutcome, get the corresponding description and remedy from the securityOutcomes dictionary
-    result_df[["securityDescription", "securityRemedy"]] = result_df[
-        "securityOutcome"
-    ].apply(
-        lambda x: pd.Series(
-            [securityOutcomes[x]["description"], securityOutcomes[x]["remedy"]]
-        )
-        if x in securityOutcomes
-        else pd.Series([None, None])
-    )
-    return result_df
 
 
 def check_info_paths(data):
@@ -584,7 +559,7 @@ async def process_input(
             total_queries = min(len(filtered_queries), max_query)
 
             print(
-                f"\nRegion: {region} | Application: {application} | Search Count: {total_queries}/{len(filtered_queries)}\n"
+                f"\n{index}: | Region: {region} | Application: {application} | Search Count: {total_queries}/{len(filtered_queries)}\n"
             )
 
             if total_queries > 0:
@@ -722,45 +697,6 @@ async def run_process_input(
                 print("Max retries exceeded. Continuing to next iteration.")
                 continue
 
-
-# async def nqe_get_hosts_by_port_1(appserver, snapshot, device, port):
-#     print(f"This may take a while... {device}  {port}")
-#     async with aiohttp.ClientSession() as session:
-#         url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
-#         body = {
-#             "query": host_query,
-#             "queryOptions": {
-#                 "columnFilters": [
-#                     {"columnName": "deviceName", "value": device},
-#                     {"columnName": "Interface", "value": port},
-#                 ],
-#             },
-#         }
-#         try:
-#             response_text, response_status = await fetch(
-#                 session,
-#                 url,
-#                 body,
-#                 method="POST",
-#                 username=username,
-#                 password=password,
-#                 headers=headers,
-#             )
-#         except asyncio.exceptions.TimeoutError:
-#             print("Request timed out. Retrying...")
-#             return await nqe_get_hosts_by_port_1(appserver, snapshot, device, port)
-
-#         if response_status == 200:
-#             response_json = json.loads(response_text)
-#             return response_json["items"]
-#         elif response_status in [401, 403]:
-#             print("Authentication failed. Please check your credentials.")
-#             return None
-#         else:
-#             print(f"Error: {response_status} {response_text}")
-#             return None
-
-
 async def nqe_get_hosts_by_port_2(appserver, snapshot):
     print(f"Gathering Hosts Details...")
     async with aiohttp.ClientSession() as session:
@@ -782,11 +718,10 @@ async def nqe_get_hosts_by_port_2(appserver, snapshot):
         if response_status == 200:
             response_json = json.loads(response_text)
             df = pd.DataFrame(response_json["items"])
-            df.to_csv('./cache/hosts.csv')
+            df.to_csv("./cache/hosts.csv")
             return response_json["items"]
         else:
             raise Exception(f"Error: {response_status} {response_text}")
-
 
 
 async def search_subnet(appserver, snapshot, dataframe):
@@ -847,6 +782,85 @@ async def gather_results(
         raise
 
 
+def generate_report(snapshot, intent, hosts, with_diag=False):
+    report = f"intent-gen-{snapshot}.xlsx"
+    forwarding_outcomes = addForwardingOutcomes(intent)
+    updatedf = return_firstlast_hop(forwarding_outcomes)
+
+    # print(f"DEBUG: {hosts}")
+
+    for index, row in updatedf.iterrows():
+        device = updatedf.at[index, "lastHopDevice"]
+        interface = updatedf.at[index, "lastHopEgressIntf"]
+        forwardingOutcome = updatedf.at[index, "forwardingOutcome"]
+        outcomes = ["DELIVERED", "NOT_DELIVERED"]
+
+        if (
+            device
+            and forwardingOutcome
+            and interface
+            and forwardingOutcome not in outcomes
+            and not bool(re.match(r"^self\..*", interface))
+        ):
+            host = hosts[(hosts["deviceName"] == device) & (hosts["Interface"] == interface)]
+            if not host.empty:
+                updatedf.at[index, "hostAddress"] = host["Address"].values[0]
+                updatedf.at[index, "MacAddress"] = host["MacAddress"].values[0]
+                updatedf.at[index, "OUI"] = host["OUI"].values[0]
+                updatedf.at[index, "hostInterface"] = host["Interface"].values[0]
+        else:
+            updatedf.at[index, "hostAddress"] = None
+            updatedf.at[index, "MacAddress"] = None
+            updatedf.at[index, "OUI"] = None
+            updatedf.at[index, "hostInterface"] = None
+
+
+    columns_to_display = [
+        "region",
+        "application",
+        "srcIp",
+        "dstIp",
+        "ipProto",
+        "dstPort",
+        "forwardingOutcome",
+        "securityOutcome",
+        "srcIpLocationType",
+        "dstIpLocationType",
+        "pathCount",
+        "forwardHops",
+        "returnPathCount",
+        "returnHops",
+        "firstHopDevice",
+        "lastHopDevice",
+        "lastHopEgressIntf",
+        "hostAddress",
+        "MacAddress",
+        "OUI",
+        "hostInterface",
+    ]
+
+    print(updatedf[columns_to_display])
+
+    if with_diag:
+        updatedf[
+            columns_to_display
+            + [
+                "queryUrl",
+                "forwardDescription",
+                "forwardRemedy",
+                "securityDescription",
+                "securityRemedy",
+            ]
+        ].to_excel(report, index=True)
+    else:
+        updatedf[
+            columns_to_display
+            + [
+                "queryUrl",
+            ]
+        ].to_excel(report, index=True)
+    update_font(report)
+
 
 def from_import(
     appserver, snapshot, infile, batchsize, limit, max_query, retries, with_diag
@@ -854,7 +868,6 @@ def from_import(
     print(f"Setting batch size: {batchsize}")
     print(f"Setting limit: {limit}")
     print(f"Setting max querys: {max_query}")
-    report = f"intent-gen-{snapshot}.xlsx"
 
     test_communication(appserver)
 
@@ -905,93 +918,16 @@ def from_import(
             if results is not None:
                 hosts = results[0]
                 intent = results[1]
+        except aiohttp.ClientOSError:
+            pass
         except Exception as e:
             logging.error(f"An error occurred: {e}")
-            raise e
+            raise
 
         print(f"End time: {datetime.datetime.now()}")
-
         logging.info(f"End time: {datetime.datetime.now()}")
 
-        forwarding_outcomes = addForwardingOutcomes(intent)
-        updatedf = return_firstlast_hop(forwarding_outcomes)
-
-        # print(f"DEBUG: {hosts}")
-
-        for index, row in updatedf.iterrows():
-            device = updatedf.at[index, "lastHopDevice"]
-            interface = updatedf.at[index, "lastHopEgressIntf"]
-            forwardingOutcome = updatedf.at[index, "forwardingOutcome"]
-            outcomes = ["DELIVERED", "NOT_DELIVERED"]
-
-            if (
-                device
-                and forwardingOutcome
-                and interface
-                and forwardingOutcome not in outcomes
-                and not bool(re.match(r"^self\..*", interface))
-            ):
-                for host in hosts:
-                    if host["deviceName"] == device and host["Interface"] == interface:
-                        updatedf.at[index, "hostAddress"] = host.get("Address", None)
-                        updatedf.at[index, "MacAddress"] = host.get("MacAddress", None)
-                        updatedf.at[index, "OUI"] = host.get("OUI", None)
-                        updatedf.at[index, "hostInterface"] = host.get(
-                            "Interface", None
-                        )
-                        break
-
-            else:
-                updatedf.at[index, "hostAddress"] = None
-                updatedf.at[index, "MacAddress"] = None
-                updatedf.at[index, "OUI"] = None
-                updatedf.at[index, "hostInterface"] = None
-
-        columns_to_display = [
-            "region",
-            "application",
-            "srcIp",
-            "dstIp",
-            "ipProto",
-            "dstPort",
-            "forwardingOutcome",
-            "securityOutcome",
-            "srcIpLocationType",
-            "dstIpLocationType",
-            "pathCount",
-            "forwardHops",
-            "returnPathCount",
-            "returnHops",
-            "firstHopDevice",
-            "lastHopDevice",
-            "lastHopEgressIntf",
-            "hostAddress",
-            "MacAddress",
-            "OUI",
-            "hostInterface",
-        ]
-
-        print(updatedf[columns_to_display])
-
-        if with_diag:
-            updatedf[
-                columns_to_display
-                + [
-                    "queryUrl",
-                    "forwardDescription",
-                    "forwardRemedy",
-                    "securityDescription",
-                    "securityRemedy",
-                ]
-            ].to_excel(report, index=True)
-        else:
-            updatedf[
-                columns_to_display
-                + [
-                    "queryUrl",
-                ]
-            ].to_excel(report, index=True)
-        update_font(report)
+        generate_report(snapshot, intent, hosts, with_diag)
 
     except Exception as e:
         print(f"An error occurred: {e}")
@@ -1041,7 +977,7 @@ def from_hosts(
                 acls_df[column] = acls_df[column].apply(tuple)
 
         acls_df.drop_duplicates(inplace=True)
-        print(f"ACL Entries Found: {len(acls_df)}\n")
+        print(f"ACL Entries Found: {limit}/{len(acls_df)}\n")
 
         # add limiter for testing
         if limit:
@@ -1060,113 +996,36 @@ def from_hosts(
                 )
             )
             if results is not None:
-                hosts = results[0]
-                intent = results[1]
+                hosts = pd.DataFrame(results[0])
+                intent = pd.DataFrame(results[1])
+
         except KeyboardInterrupt:
             print("Interrupted by user, continuing with available data...")
             # Get a list of all the csv files
-            hosts = pd.read_csv('./cache/hosts.csv')
+            hosts = pd.read_csv("./cache/hosts.csv")
             csv_files = glob.glob("./cache/intent_*.csv")
             intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
         except asyncio.TimeoutError:
             print("Operation timed out. Recovering from the persisted dataframe...")
+            hosts = pd.read_csv("./cache/hosts.csv")
             csv_files = glob.glob("./cache/intent_*.csv")
             intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
-        except:
-            raise
+        except aiohttp.ClientOSError:
+            print("Operation timed out. Recovering from the persisted dataframe...")
+            csv_files = glob.glob("./cache/intent_*.csv")
+            hosts = pd.read_csv("./cache/hosts.csv")
+            intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
 
         print(f"Collection End: {datetime.datetime.now()}")
         logging.info(f"Collection End: {datetime.datetime.now()}")
 
-        forwarding_outcomes = addForwardingOutcomes(intent)
-        updatedf = return_firstlast_hop(forwarding_outcomes)
-
-        # print(f"DEBUG: {hosts}")
-
-        for index, row in updatedf.iterrows():
-            device = updatedf.at[index, "lastHopDevice"]
-            interface = updatedf.at[index, "lastHopEgressIntf"]
-            forwardingOutcome = updatedf.at[index, "forwardingOutcome"]
-            outcomes = ["DELIVERED", "NOT_DELIVERED"]
-
-            if (
-                device
-                and forwardingOutcome
-                and interface
-                and forwardingOutcome not in outcomes
-                and not bool(re.match(r"^self\..*", interface))
-            ):
-                for host in hosts:
-                    if host["deviceName"] == device and host["Interface"] == interface:
-                        updatedf.at[index, "hostAddress"] = host.get("Address", None)
-                        updatedf.at[index, "MacAddress"] = host.get("MacAddress", None)
-                        updatedf.at[index, "OUI"] = host.get("OUI", None)
-                        updatedf.at[index, "hostInterface"] = host.get(
-                            "Interface", None
-                        )
-                        break
-
-            else:
-                updatedf.at[index, "hostAddress"] = None
-                updatedf.at[index, "MacAddress"] = None
-                updatedf.at[index, "OUI"] = None
-                updatedf.at[index, "hostInterface"] = None
-
-        columns_to_display = [
-            "region",
-            "application",
-            "srcIp",
-            "dstIp",
-            "ipProto",
-            "dstPort",
-            "forwardingOutcome",
-            "securityOutcome",
-            "srcIpLocationType",
-            "dstIpLocationType",
-            "pathCount",
-            "forwardHops",
-            "returnPathCount",
-            "returnHops",
-            "firstHopDevice",
-            "lastHopDevice",
-            "lastHopEgressIntf",
-            "hostAddress",
-            "MacAddress",
-            "OUI",
-            "hostInterface",
-        ]
-
-        print(updatedf[columns_to_display])
-
-        if with_diag:
-            updatedf[
-                columns_to_display
-                + [
-                    "queryUrl",
-                    "forwardDescription",
-                    "forwardRemedy",
-                    "securityDescription",
-                    "securityRemedy",
-                ]
-            ].to_excel(report, index=True)
-        else:
-            updatedf[
-                columns_to_display
-                + [
-                    "queryUrl",
-                ]
-            ].to_excel(report, index=True)
-        update_font(report)
+        generate_report(snapshot, intent, hosts, with_diag)
 
     except Exception as e:
-        raise
-        # print(f"An error occurred: {e}")
-        # print(traceback.format_exc())
-
-        # logging.error(f"An error occurred: {e}")
-        # logging.error(traceback.format_exc())
-
-        return
+        print(f"An error occurred: {e}")
+        print(traceback.format_exc())
+        logging.error(f"An error occurred: {e}")
+        logging.error(traceback.format_exc())
 
 
 def check(appserver, snapshot, infile, csv):
@@ -1201,6 +1060,13 @@ def check(appserver, snapshot, infile, csv):
 
 def main():
     arguments = docopt(__doc__)
+    infile = arguments["<input>"]
+    appserver = arguments["<appserver>"]
+    snapshot = arguments["<snapshot>"]
+    batchsize = int(arguments["--batch"])
+    limit = int(arguments["--limit"])
+    max_query = int(arguments["--max"])
+    with_diag = arguments["--withdiag"]
     global debug
     debug = arguments["--debug"]
     print(f"Debug: {debug}")
@@ -1209,15 +1075,28 @@ def main():
     if not os.path.exists("./cache"):
         os.makedirs("./cache")
 
+    # Check for existing intent*.csv files in ./cache directory
+    csv_files = glob.glob("./cache/intent_*.csv")
+    if csv_files:
+        print("Found existing intent*.csv files in ./cache directory.")
+        purge = input("Do you want to purge these results? (yes)/no: ")
+        if purge.lower() == "yes" or purge == "":
+            for file in csv_files:
+                os.remove(file)
+            print("Purged existing intent*.csv files.")
+
+        else:
+            csv_files = glob.glob("./cache/intent_*.csv")
+            print(csv_files)
+            intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+            print(f"Total rows in intent: {len(intent)}")
+
+            hosts = pd.read_csv("./cache/hosts.csv")
+            generate_report("cache", intent, hosts, with_diag)
+            return
+
     if arguments["from_import"]:
         print("Running: from_import")
-        infile = arguments["<input>"]
-        appserver = arguments["<appserver>"]
-        snapshot = arguments["<snapshot>"]
-        batchsize = int(arguments["--batch"])
-        limit = int(arguments["--limit"])
-        max_query = int(arguments["--max"])
-        with_diag = arguments["--withdiag"]
 
         from_import(
             appserver, snapshot, infile, batchsize, limit, max_query, retries, with_diag
