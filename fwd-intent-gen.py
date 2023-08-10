@@ -42,7 +42,7 @@
 """
 Usage:
   fwd-intent-gen.py from_import <input> <appserver> <snapshot> [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
-  fwd-intent-gen.py from_hosts <appserver> <snapshot>   [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
+  fwd-intent-gen.py from_acls <appserver> <snapshot>   [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
   fwd-intent-gen.py check <input> <appserver> <snapshot> [--csv] [--debug]
 
 Options:
@@ -358,7 +358,6 @@ def return_firstlast_hop(df):
 
     return new_df
 
-
 def addForwardingOutcomes(result):
 
     result['forwardingDescription'] = result['forwardingOutcome'].apply(lambda x: forwardingOutcomes[x]["description"] if x in forwardingOutcomes else None)
@@ -658,10 +657,14 @@ async def process_input(
                         ],
                         # errors="ignore",
                     )
+                    logging.info("paths_df")
+                    logging.warning(paths_df.iloc[0])
                     merged_df = pd.merge(
                         paths_df, query_list_df, left_index=True, right_index=True
                     )
                     merged_df.to_csv(f"./cache/intent_{index}_{i}.csv", index=False)
+                    logging.info("merged_df")
+                    logging.warning(merged_df.iloc[0])
                     dfs.append(merged_df)
 
     if len(dfs) > 0:
@@ -824,13 +827,18 @@ async def gather_results(
 
 
 def generate_report(snapshot, intent, hosts, with_diag=False):
-    report = f"intent-gen-{snapshot}.xlsx"
+    report = f"intent-gen-{snapshot}.csv"
     forwarding_outcomes = addForwardingOutcomes(intent)
     updatedf = return_firstlast_hop(forwarding_outcomes)
 
+    logging.info(updatedf.iloc[0])
+
+    
+
     # print(f"DEBUG: {hosts}")
 
-    for index, row in updatedf.iterrows():
+    for index, row in tqdm(updatedf.iterrows(), desc="Processing Data"):
+
         device = updatedf.at[index, "lastHopDevice"]
         interface = updatedf.at[index, "lastHopEgressIntf"]
         forwardingOutcome = updatedf.at[index, "forwardingOutcome"]
@@ -849,11 +857,16 @@ def generate_report(snapshot, intent, hosts, with_diag=False):
                 updatedf.at[index, "MacAddress"] = host["MacAddress"].values[0]
                 updatedf.at[index, "OUI"] = host["OUI"].values[0]
                 updatedf.at[index, "hostInterface"] = host["Interface"].values[0]
+                logging.info(f"Updated host details for device: {device} and interface: {interface}")
+            else:
+                logging.warning(f"No host details found for device: {device} and interface: {interface}")
         else:
             updatedf.at[index, "hostAddress"] = None
             updatedf.at[index, "MacAddress"] = None
             updatedf.at[index, "OUI"] = None
             updatedf.at[index, "hostInterface"] = None
+            logging.warning(f"No device or interface details found for device: {device} and interface: {interface}")
+
 
 
     columns_to_display = [
@@ -882,25 +895,34 @@ def generate_report(snapshot, intent, hosts, with_diag=False):
 
     print(updatedf[columns_to_display])
 
-    if with_diag:
-        updatedf[
-            columns_to_display
-            + [
-                "queryUrl",
-                "forwardDescription",
-                "forwardRemedy",
-                "securityDescription",
-                "securityRemedy",
-            ]
-        ].to_excel(report, index=True)
-    else:
-        updatedf[
-            columns_to_display
-            + [
-                "queryUrl",
-            ]
-        ].to_excel(report, index=True)
-    update_font(report)
+    # Excel has a max row limit of 1048576
+    # updatedf = updatedf.head(1048575)
+
+    
+    try:
+        if with_diag:
+            updatedf[
+                columns_to_display
+                + [
+                    "queryUrl",
+                    "forwardDescription",
+                    "forwardRemedy",
+                    "securityDescription",
+                    "securityRemedy",
+                ]
+            ].to_csv(report, index=False)
+        else:
+            updatedf[
+                columns_to_display
+                + [
+                    "queryUrl",
+                ]
+            ].to_csv(report, index=False)
+    except Exception as e:
+        print(f"Error occurred while writing to CSV: {e}")
+        raise
+    # update_font(report)
+
 
 
 def from_import(
@@ -980,7 +1002,7 @@ def from_import(
         return
 
 
-def from_hosts(
+def from_acls(
     appserver, snapshot, batchsize, limit, max_query, retries, with_diag=False
 ):
     print(f"Setting batch size: {batchsize}")
@@ -1039,6 +1061,9 @@ def from_hosts(
             if results is not None:
                 hosts = pd.DataFrame(results[0])
                 intent = pd.DataFrame(results[1])
+                logging.warning(hosts.columns)
+
+                
 
         except KeyboardInterrupt:
             print("Interrupted by user, continuing with available data...")
@@ -1112,7 +1137,9 @@ def main():
     debug = arguments["--debug"]
     print(f"Debug: {debug}")
     retries = 3
-    logging.basicConfig(filename="fwd-intent-gen.log", level=logging.INFO)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    logging.basicConfig(filename=f"fwd-intent-gen-{timestamp}.log", level=logging.INFO)
+
     if not os.path.exists("./cache"):
         os.makedirs("./cache")
 
@@ -1122,13 +1149,13 @@ def main():
         print("Found existing intent*.csv files in ./cache directory.")
         purge = input("Do you want to purge these results? (yes)/no: ")
         if purge.lower() == "yes" or purge == "":
-            for file in csv_files:
+            for file in tqdm(csv_files, desc="Purging cache"):
                 os.remove(file)
-            print("Purged existing intent*.csv files.")
-
         else:
             csv_files = glob.glob("./cache/intent_*.csv")
             intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+            intent['hops'] = intent['hops'].apply(lambda x: json.loads(x.replace("'", '"')))
+
             print(f"Total rows in intent: {len(intent)}")
 
             hosts = pd.read_csv("./cache/hosts.csv")
@@ -1151,23 +1178,20 @@ def main():
 
         check(appserver, snapshot, infile, csv)
 
-    elif arguments["from_hosts"]:
-        print("Running: from_hosts")
+    elif arguments["from_acls"]:
+        print("Running: from_acls")
         appserver = arguments["<appserver>"]
         snapshot = arguments["<snapshot>"]
         batchsize = int(arguments["--batch"])
         limit = int(arguments["--limit"])
         max_query = int(arguments["--max"])
         with_diag = arguments["--withdiag"]
-        from_hosts(appserver, snapshot, batchsize, limit, max_query, retries, with_diag)
+        from_acls(appserver, snapshot, batchsize, limit, max_query, retries, with_diag)
 
     else:
         print(
             "Invalid command. Please refer to the usage message for available commands."
         )
 
-
 if __name__ == "__main__":
     main()
-
-# python fwd-intent-gen.py run fwd.app input.json 627174 Q_cf01d14087eb77f855397e2b73623ea2b2751893 --debug

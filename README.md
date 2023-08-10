@@ -4,7 +4,7 @@
 ```
 Usage:
   fwd-intent-gen.py from_import <input> <appserver> <snapshot> [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
-  fwd-intent-gen.py from_hosts <appserver> <snapshot>   [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
+  fwd-intent-gen.py from_acls <appserver> <snapshot>   [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
   fwd-intent-gen.py check <input> <appserver> <snapshot> [--csv] [--debug]
 
 Options:
@@ -49,9 +49,9 @@ Execute all checks, results are placed into an .xlsx file called `intent-gen-<sn
 `python fwd-intent-gen.py from_import input.json fwd.app 627174`
 
 
-### from_hosts
+### from_acls
 
-`python fwd-intent-gen.py from_hosts fwd.app 642218 --limit 5`
+`python fwd-intent-gen.py from_acls fwd.app 642218 --limit 5`
 
 
 #### Example Output
@@ -72,6 +72,13 @@ Execute all checks, results are placed into an .xlsx file called `intent-gen-<sn
 11   APAC        SNMP  10.6.143.198    10.5.20.12       17  161-162     NOT_DELIVERED         UNKNOWN         0           0               0          0
 
 ```
+
+## Things to be aware of
+
+1. This script can generate a lot of data well over 1M rows supported by Excel. We serialize to a CSV but Excel well truncate this list to its max rows of 1048576
+2. Since processing can take a long time you can escape out by pressing Ctrl-C. We will process what we have in the cache from that point
+3. If there is a cache, you will be asked when running the script if you want to delete the cache. Pressing enter or typing "yes" will purge the cache and make the API calls. If you select "no" we will generate a report from the cache. 
+
 
 
 # Discalimer:
