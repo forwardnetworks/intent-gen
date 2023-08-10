@@ -768,16 +768,11 @@ async def nqe_get_hosts_by_port_2(appserver, snapshot):
             raise Exception(f"Error: {response_status} {response_text}")
 
 
-async def search_subnet(appserver, snapshot, dataframe):
+async def search_subnet(appserver, snapshot, addresses):
     result_list = []  # List to store the response JSON for each address
     async with aiohttp.ClientSession() as session:
-        addresses = []
-        for row in dataframe.itertuples():
-            addresses.extend(row.sources)
-            addresses.extend(row.destinations)
-        addresses = list(set(addresses))  # remove duplicates
 
-        for address in addresses:
+        for address in tqdm(addresses, desc="Searching Subnets"):
             url = f"https://{appserver}/api/snapshots/{snapshot}/subnets"
             params = {"address": address, "minimal": "true"}
             try:
@@ -801,6 +796,8 @@ async def search_subnet(appserver, snapshot, dataframe):
             elif response_status == 403:
                 print("Warning: Status 403. Please set FWD_USER and FWD_PASSWORD.")
                 sys.exit(1)
+            elif response_status == 400:
+                raise  Exception(f"Error: {response_text}")
             else:
                 raise Exception(f"Error: {response_status}")
 
@@ -826,18 +823,15 @@ async def gather_results(
         raise
 
 
-def generate_report(snapshot, intent, hosts, with_diag=False):
-    report = f"intent-gen-{snapshot}.csv"
+def prepare_report(appserver, snapshot, intent, hosts, with_diag=False):
     forwarding_outcomes = addForwardingOutcomes(intent)
-    updatedf = return_firstlast_hop(forwarding_outcomes)
+    report_df = return_firstlast_hop(forwarding_outcomes)
 
-    # print(f"DEBUG: {hosts}")
+    for index, row in tqdm(report_df.iterrows(), desc="Processing Data"):
 
-    for index, row in tqdm(updatedf.iterrows(), desc="Processing Data"):
-
-        device = updatedf.at[index, "lastHopDevice"]
-        interface = updatedf.at[index, "lastHopEgressIntf"]
-        forwardingOutcome = updatedf.at[index, "forwardingOutcome"]
+        device = report_df.at[index, "lastHopDevice"]
+        interface = report_df.at[index, "lastHopEgressIntf"]
+        forwardingOutcome = report_df.at[index, "forwardingOutcome"]
         outcomes = ["DELIVERED", "NOT_DELIVERED"]
 
         if (
@@ -849,21 +843,27 @@ def generate_report(snapshot, intent, hosts, with_diag=False):
         ):
             host = hosts[(hosts["deviceName"] == device) & (hosts["Interface"] == interface)]
             if not host.empty:
-                updatedf.at[index, "hostAddress"] = host["Address"].values[0]
-                updatedf.at[index, "MacAddress"] = host["MacAddress"].values[0]
-                updatedf.at[index, "OUI"] = host["OUI"].values[0]
-                updatedf.at[index, "hostInterface"] = host["Interface"].values[0]
+                report_df.at[index, "hostAddress"] = host["Address"].values[0]
+                report_df.at[index, "MacAddress"] = host["MacAddress"].values[0]
+                report_df.at[index, "OUI"] = host["OUI"].values[0]
+                report_df.at[index, "hostInterface"] = host["Interface"].values[0]
                 logging.info(f"Updated host details for device: {device} and interface: {interface}")
             else:
                 logging.warning(f"No host details found for device: {device} and interface: {interface}")
         else:
-            updatedf.at[index, "hostAddress"] = None
-            updatedf.at[index, "MacAddress"] = None
-            updatedf.at[index, "OUI"] = None
-            updatedf.at[index, "hostInterface"] = None
+            report_df.at[index, "hostAddress"] = None
+            report_df.at[index, "MacAddress"] = None
+            report_df.at[index, "OUI"] = None
+            report_df.at[index, "hostInterface"] = None
             logging.warning(f"No device or interface details found for device: {device} and interface: {interface}")
+   
+   
+    return report_df
 
 
+
+def generate_report(snapshot,report_df, with_diag=False):
+    report = f"intent-gen-{snapshot}.csv"
 
     columns_to_display = [
         "region",
@@ -889,15 +889,13 @@ def generate_report(snapshot, intent, hosts, with_diag=False):
         "hostInterface",
     ]
 
-    print(updatedf[columns_to_display])
-
     # Excel has a max row limit of 1048576
-    # updatedf = updatedf.head(1048575)
+    # report_df = report_df.head(1048575)
 
     
     try:
         if with_diag:
-            updatedf[
+            report_df[
                 columns_to_display
                 + [
                     "queryUrl",
@@ -908,7 +906,7 @@ def generate_report(snapshot, intent, hosts, with_diag=False):
                 ]
             ].to_csv(report, index=False)
         else:
-            updatedf[
+            report_df[
                 columns_to_display
                 + [
                     "queryUrl",
@@ -937,7 +935,17 @@ def from_import(
         data = json.load(file)
 
     app_df = flatten_input(data)
-    address_df = asyncio.run(search_subnet(appserver, snapshot, app_df))
+
+    addresses = []
+    for row in app_df.itertuples():
+                addresses.extend(row.sources)
+                addresses.extend(row.destinations)
+                addresses = list(set(addresses))  # remove duplicates
+
+
+    address_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
+    address_df.to_csv(f"./cache/subnets.csv", index=False)
+
 
     try:
         app_df.sort_values(by="application")
@@ -975,8 +983,10 @@ def from_import(
                 )
             )
             if results is not None:
-                hosts = results[0]
-                intent = results[1]
+                hosts = pd.DataFrame(results[0])
+                intent = pd.DataFrame(results[1])
+                logging.warning(hosts.columns)
+
         except aiohttp.ClientOSError:
             pass
         except Exception as e:
@@ -986,7 +996,9 @@ def from_import(
         print(f"End time: {datetime.datetime.now()}")
         logging.info(f"End time: {datetime.datetime.now()}")
 
-        generate_report(snapshot, intent, hosts, with_diag)
+        report_df = prepare_report(appserver, snapshot, intent, hosts, with_diag)
+        generate_report(snapshot, report_df, with_diag)
+
 
     except Exception as e:
         print(f"An error occurred: {e}")
@@ -1004,8 +1016,6 @@ def from_acls(
     print(f"Setting batch size: {batchsize}")
     print(f"Setting limit: {limit}")
     print(f"Setting max querys: {max_query}")
-
-    report = f"intent-gen-{snapshot}.xlsx"
     if debug:
         pd.set_option("display.max_rows", None)  # Show all rows
 
@@ -1038,6 +1048,9 @@ def from_acls(
         acls_df.drop_duplicates(inplace=True)
         print(f"ACL Entries Found: {limit}/{len(acls_df)}\n")
 
+        # address_df = asyncio.run(search_subnet(appserver, snapshot, acls_df))
+        # print(f"DEBUG: 1044\n {address_df}" )
+
         # add limiter for testing
         if limit:
             acls_df = acls_df.head(limit)
@@ -1059,8 +1072,6 @@ def from_acls(
                 intent = pd.DataFrame(results[1])
                 logging.warning(hosts.columns)
 
-                
-
         except KeyboardInterrupt:
             print("Interrupted by user, continuing with available data...")
             # Get a list of all the csv files
@@ -1081,7 +1092,22 @@ def from_acls(
         print(f"Collection End: {datetime.datetime.now()}")
         logging.info(f"Collection End: {datetime.datetime.now()}")
 
-        generate_report(snapshot, intent, hosts, with_diag)
+        report_df = prepare_report(appserver, snapshot, intent, hosts, with_diag)
+        addresses = list(set([tuple(x) for x in report_df[['srcIp', 'dstIp']].values.tolist()]))
+
+        
+        subnets_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
+        subnets_df = subnets_df[subnets_df['origin'] == 'HOST']
+        data_df = pd.json_normalize(subnets_df['data'].apply(pd.Series).stack()).reset_index(drop=True)
+        data_df = pd.concat([subnets_df[['address', 'origin', 'description', 'status']], data_df], axis=1)
+
+        # print(data_df.iloc[0])
+        
+        data_df.to_csv(f"./cache/subnets.csv", index=False)
+
+        print(subnets_df)
+
+        generate_report(snapshot, report_df, with_diag)
 
     except Exception as e:
         print(f"An error occurred: {e}")
@@ -1102,8 +1128,6 @@ def check(appserver, snapshot, infile, csv):
         data = json.load(file)
 
     app_df = flatten_input(data)
-    address_df = asyncio.run(search_subnet(appserver, snapshot, app_df))
-
     try:
         address_df = asyncio.run(search_subnet(appserver, snapshot, app_df))
     except Exception as e:
@@ -1134,13 +1158,15 @@ def main():
     print(f"Debug: {debug}")
     retries = 3
     timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    logging.basicConfig(filename=f"fwd-intent-gen-{timestamp}.log", level=logging.INFO)
+    if not os.path.exists("./logs"):
+        os.makedirs("./logs")
+    logging.basicConfig(filename=f"./logs/fwd-intent-gen-{timestamp}.log", level=logging.INFO)
 
     if not os.path.exists("./cache"):
         os.makedirs("./cache")
 
     # Check for existing intent*.csv files in ./cache directory
-    csv_files = glob.glob("./cache/intent_*.csv")
+    csv_files = glob.glob("./cache/*.csv")
     if csv_files:
         print("Found existing intent*.csv files in ./cache directory.")
         purge = input("Do you want to purge these results? (yes)/no: ")
@@ -1155,7 +1181,7 @@ def main():
             print(f"Total rows in intent: {len(intent)}")
 
             hosts = pd.read_csv("./cache/hosts.csv")
-            generate_report("cache", intent, hosts, with_diag)
+            generate_report(appserver, "cache", intent, hosts, with_diag)
             return
 
     if arguments["from_import"]:
