@@ -831,10 +831,6 @@ def generate_report(snapshot, intent, hosts, with_diag=False):
     forwarding_outcomes = addForwardingOutcomes(intent)
     updatedf = return_firstlast_hop(forwarding_outcomes)
 
-    logging.info(updatedf.iloc[0])
-
-    
-
     # print(f"DEBUG: {hosts}")
 
     for index, row in tqdm(updatedf.iterrows(), desc="Processing Data"):
