@@ -823,7 +823,7 @@ async def gather_results(
         raise
 
 
-def prepare_report(appserver, snapshot, intent, hosts, with_diag=False):
+def prepare_report(intent, hosts):
     forwarding_outcomes = addForwardingOutcomes(intent)
     report_df = return_firstlast_hop(forwarding_outcomes)
 
@@ -912,6 +912,9 @@ def generate_report(snapshot,report_df, with_diag=False):
                     "queryUrl",
                 ]
             ].to_csv(report, index=False)
+
+
+        print(f"Report Created: {report}")
     except Exception as e:
         print(f"Error occurred while writing to CSV: {e}")
         raise
@@ -996,7 +999,7 @@ def from_import(
         print(f"End time: {datetime.datetime.now()}")
         logging.info(f"End time: {datetime.datetime.now()}")
 
-        report_df = prepare_report(appserver, snapshot, intent, hosts, with_diag)
+        report_df = prepare_report(intent, hosts)
         generate_report(snapshot, report_df, with_diag)
 
 
@@ -1092,7 +1095,7 @@ def from_acls(
         print(f"Collection End: {datetime.datetime.now()}")
         logging.info(f"Collection End: {datetime.datetime.now()}")
 
-        report_df = prepare_report(appserver, snapshot, intent, hosts, with_diag)
+        report_df = prepare_report(intent, hosts)
         addresses = list(set([tuple(x) for x in report_df[['srcIp', 'dstIp']].values.tolist()]))
 
         
@@ -1181,7 +1184,9 @@ def main():
             print(f"Total rows in intent: {len(intent)}")
 
             hosts = pd.read_csv("./cache/hosts.csv")
-            generate_report(appserver, "cache", intent, hosts, with_diag)
+            
+            report_df = prepare_report(intent, hosts)
+            generate_report(snapshot, report_df, with_diag)
             return
 
     if arguments["from_import"]:
