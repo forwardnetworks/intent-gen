@@ -72,8 +72,10 @@ import logging
 import glob
 import datetime
 from tqdm import tqdm
-
+from urllib.parse import quote
 import urllib3
+import inspect
+
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -209,13 +211,20 @@ headers = {
 
 # Utilities
 
+def print_debug(message):
+    print(f"{datetime.datetime.now()} Debug on line {inspect.currentframe().f_back.f_lineno}: {message}")
+            
+
+def toQuote(s):
+    return quote(s, safe='')
+
 
 def test_communication(appserver):
     try:
-        response = requests.get(f"https://{appserver}", timeout=10)
+        response = requests.get(f"https://{appserver}", timeout=10, verify=False)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        print(f"HTTP communication failed with {appserver}.")
+        print(f"HTTP communication failed with {appserver} {e}.")
         sys.exit(1)
 
 
@@ -295,27 +304,34 @@ def resolve_ip_to_domain(ip_address):
 
 def nqe_get_hosts_from_acl(query, appserver, snapshot):
     url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
-    body = {"query": query, "queryOptions": {"limit": 10000}}
+    limit = 10000
+    offset = 0
+    items = []
 
-    response = requests.post(
-        url, json=body, auth=(username, password), headers=headers, verify=False
-    )
+    while True:
+        body = {"query": query, "queryOptions": {"limit": limit, "offset": offset}}
+        response = requests.post(
+            url, json=body, auth=(username, password), headers=headers, verify=False
+        )
+        response_status = response.status_code
 
-    response_text = response.text
-    response_status = response.status_code
+        try:
+            response.raise_for_status()
+            response_json = response.json()
+            # if debug: 
+            print_debug(f"Offset: {offset} Items: {len(response_json['items'])} List: {len(items)}")
+            if not response_json["items"]:
+                break
+            items.extend(response_json["items"])
+            offset += limit
+        except requests.exceptions.HTTPError as err:
+            if response_status in [401, 403]:
+                print("Please set FWD_USER and FWD_PASSWORD to authentication credentials")
+            elif response_status in [409]:
+                print("Snapshot is being processed, try again in a few")
+            raise SystemExit(err)
 
-    if response_status == 200:
-        response_json = response.json()["items"]
-    elif response_status == 401 or response_status == 403:
-        print("Please set FWD_USER and FWD_PASSWORD to authentication credentials")
-        sys.exit(1)
-    elif response_status == 401 or response_status == 409:
-        print("Snapshot is being processed, try again in a few")
-        sys.exit(1)
-    else:
-        raise
-
-    return response_json
+    return items
 
 
 # Get the username and password from environment variables.
@@ -462,27 +478,32 @@ async def fetch(
     password=None,
     headers={},
     timeout=60,
+    retries=3,
 ):
     auth = aiohttp.BasicAuth(username, password) if username and password else None
-    try:
-        if method == "GET":
-            async with session.get(
-                url, auth=auth, params=data, headers=headers, ssl=False, timeout=timeout
-            ) as response:
-                return await response.read(), response.status
-        elif method == "POST":
-            async with session.post(
-                url, auth=auth, headers=headers, json=data, ssl=False, timeout=timeout
-            ) as response:
-                return await response.read(), response.status
-        else:
-            raise ValueError(f"Invalid HTTP method: {method}")
-    except (
-        aiohttp.client_exceptions.ClientConnectorError,
-        aiohttp.client_exceptions.ClientOSError,
-        asyncio.TimeoutError,
-    ) as e:
-        raise e
+    for retry in range(retries):
+        try:
+            if method == "GET":
+                async with session.get(
+                    url, auth=auth, params=data, headers=headers, ssl=False, timeout=timeout
+                ) as response:
+                    # print(f"GET request to {url} returned status {response.status}")
+                    return await response.read(), response.status
+            elif method == "POST":
+                async with session.post(
+                    url, auth=auth, headers=headers, json=data, ssl=False, timeout=timeout
+                ) as response:
+                    return await response.read(), response.status
+            else:
+                raise ValueError(f"Invalid HTTP method: {method}")
+        except Exception as e: 
+            print_debug(e)
+            if retry < retries - 1:  # if it's not the last retry attempt
+                print_debug(f"Failed to fetch, retrying in {2 ** retry} seconds...")
+                await asyncio.sleep(2 ** retry)
+            else:
+                print_debug(f"Error {e}")
+                raise e
 
 
 def fixup_queries(input):
@@ -591,7 +612,7 @@ async def process_input(
             query_list_df = pd.DataFrame(filtered_queries)
 
             if debug:
-                print(f"\nDEBUG: QueryList\n{query_list_df}")
+                print_debug(f"\nQueryList\n{query_list_df}")
 
             query_list_df["region"] = region
             query_list_df["application"] = application
@@ -599,12 +620,12 @@ async def process_input(
             total_queries = min(len(filtered_queries), max_query)
 
             print(
-                f"\n{index}: | Region: {region} | Application: {application} | Search Count: {total_queries}/{len(filtered_queries)}\n"
+                f"\n{index}: | Region: {region} | Application: {application} | Search Queries/Found: {total_queries}/{len(filtered_queries)}\n"
             )
 
             if total_queries > 0:
                 num_batches = math.ceil(total_queries / batch_size)
-                for i in tqdm(range(num_batches), desc="Search"):
+                for i in tqdm(range(num_batches), desc="Path Search"):
                     start_index = i * batch_size
                     end_index = min((i + 1) * batch_size, total_queries)
                     batch_queries = filtered_queries[start_index:end_index]
@@ -622,14 +643,14 @@ async def process_input(
                             headers=headers_seq,
                         )
                     except asyncio.TimeoutError:
-                        print("Request timed out. Skipping to next iteration.")
+                        print_debug("Request timed out. Skipping to next iteration.")
                         continue
                     await asyncio.sleep(3)
 
                     parsed_data = []
                     # Check if the request was successful.
                     if response_status != 200:
-                        print(
+                        print_debug(
                             f"Request failed with status code: {response_status}\n result: {response_text}\n body: {body}"
                         )
                         continue
@@ -707,23 +728,23 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
                 password=password,
                 headers=headers,
             )
+            response_status.raise_for_status()
+            response_json = json.loads(response_text)
+            return response_json["items"]
         except asyncio.exceptions.TimeoutError:
-            print("Request timed out. Retrying...")
+            print_debug("Request timed out. Retrying...")
             return await nqe_get_hosts_by_port(
                 queryId, appserver, snapshot, device, port
             )
-
-        if response_status == 200:
-            response_json = json.loads(response_text)
-            return response_json["items"]
-        elif response_status in [401, 403]:
-            print(
-                "Please set environment for FWD_USER, FWD_PASSWORD to your credentials"
-            )
-            sys.exit(1)
-        else:
-            print(f"Error: {response_status} {response_text}")
-            return None
+        except requests.exceptions.HTTPError as err:
+            if response_status in [401, 403]:
+                print(
+                    "Please set environment for FWD_USER, FWD_PASSWORD to your credentials"
+                )
+                sys.exit(1)
+            else:
+                print(f"Error: {err}")
+                return None
 
 
 async def run_process_input(
@@ -742,33 +763,61 @@ async def run_process_input(
                 continue
 
 async def nqe_get_hosts_by_port_2(appserver, snapshot):
-    print(f"Gathering Hosts Details...")
+    print(f"\nGathering Hosts Details...\n")
     async with aiohttp.ClientSession() as session:
         url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
-        body = {"query": host_query, "queryOptions": {"limit": 10000}}
-        try:
-            response_text, response_status = await fetch(
-                session,
-                url,
-                body,
-                method="POST",
-                username=username,
-                password=password,
-                headers=headers,
-            )
-        except asyncio.exceptions.TimeoutError:
-            raise
-
-        if response_status == 200:
-            response_json = json.loads(response_text)
-            df = pd.DataFrame(response_json["items"])
-            df.to_csv("./cache/hosts.csv")
-            return response_json["items"]
-        else:
-            raise Exception(f"Error: {response_status} {response_text}")
-
-
+        offset = 0
+        limit = 2000
+        items = []
+        while True:
+            body = {"query": host_query, "queryOptions": {"offset": offset, "limit": limit}}
+            try:
+                response_text, response_status = await fetch(
+                    session,
+                    url,
+                    body,
+                    method="POST",
+                    username=username,
+                    password=password,
+                    headers=headers,
+                )
+            except asyncio.exceptions.TimeoutError:
+                print_debug("Request timed out. Retrying...")
+                continue
+            if response_status == 200:
+                response_json = json.loads(response_text)
+                if not response_json.get("items"):
+                    break
+                print_debug(f"Items:{len(response_json['items'])} Offset:{offset}")
+                items.extend(response_json["items"])
+                offset += limit
+            else:
+                print(f"Error: {response_status} {response_text}")
+                continue
+        print_debug(f"Completed gathering hosts {len(items)}")
+        df = pd.DataFrame(items)
+        df.to_csv("./cache/hosts.csv")
+        return df
+    
 async def search_subnet(appserver, snapshot, addresses):
+    # Split the addresses into chunks for each coroutine
+    num_coroutines = 6  # Change this to the number of coroutines you want
+    address_chunks = [addresses[i::num_coroutines] for i in range(num_coroutines)]
+    
+    # Create a coroutine for each chunk of addresses
+    coroutines = [search_subnet_chunk(appserver, snapshot, chunk) for chunk in address_chunks]
+    
+    # Run the coroutines concurrently and gather the results
+    results = await asyncio.gather(*coroutines)
+    
+    # Flatten the list of results
+    result_list = [item for sublist in results for item in sublist]
+    
+    parsed_data = parse_subnets(result_list)
+    df = pd.DataFrame(parsed_data)
+    return df
+
+async def search_subnet_chunk(appserver, snapshot, addresses):
     result_list = []  # List to store the response JSON for each address
     async with aiohttp.ClientSession() as session:
 
@@ -786,7 +835,7 @@ async def search_subnet(appserver, snapshot, addresses):
                     headers=headers,
                 )
             except asyncio.exceptions.TimeoutError:
-                print("Request timed out. Skipping to next iteration.")
+                print_debug("Request timed out. Skipping to next iteration.")
                 continue
 
             if response_status == 200:
@@ -801,10 +850,52 @@ async def search_subnet(appserver, snapshot, addresses):
             else:
                 raise Exception(f"Error: {response_status}")
 
-    parsed_data = parse_subnets(result_list)
-    df = pd.DataFrame(parsed_data)
-    return df
+    return result_list
 
+async def search_interface(appserver, snapshot, devices):
+    df_list = []  # Initialize an empty list to store dataframes
+    async with aiohttp.ClientSession() as session:
+        for device, interfaceName in tqdm(devices, desc="Searching Interfaces"):
+            if interfaceName is not None:
+                interface_update = toQuote(interfaceName)
+                url = f"https://{appserver}/api/snapshots/{snapshot}/devices/{device}/interfaces/{interface_update}"
+                try:
+                    response_text, response_status = await fetch(
+                        session,
+                        url,
+                        data = None,
+                        method="GET",
+                        username=username,
+                        password=password,
+                        headers=headers,
+                    )
+                    response_json = json.loads(response_text)
+                    response_json["device"] = device
+                    if debug:
+                        print_debug(response_json)
+                    df = pd.DataFrame([response_json], columns=['name', 'type', 'description', 'ipAddresses', 'device'])
+                    df = df.applymap(lambda x: tuple(x) if isinstance(x, list) else x)  # Convert lists to tuples
+                    df_list.append(df)  # Add the dataframe to the list
+                except asyncio.exceptions.TimeoutError:
+                    print_debug("Request timed out. Skipping to next iteration.")
+                    continue
+                except KeyboardInterrupt:
+                    print_debug("Interrupted by user, raising exception...")
+                    raise
+                except json.JSONDecodeError:
+                    print_debug(f"Error: Could not decode the response into JSON. Response: {response_text}")
+                    continue
+                except Exception as e:
+                    print_debug(f"Error: An unexpected error occurred. {e}")
+                    print_debug(traceback.format_exc())
+                    continue
+                if response_status == 403:
+                    print("Warning: Status 403. Please set FWD_USER and FWD_PASSWORD.")
+                    sys.exit(1)
+                elif response_status != 200:
+                    print(f"Warning: Unexpected status code {response_status}. Skipping to next iteration.")
+                    continue
+    return pd.concat(df_list).drop_duplicates()  # Concatenate the list of dataframes into a single dataframe and remove duplicates
 
 async def gather_results(
     appserver, snapshot, acls_df, batchsize, max_query, retries, address_df=None
@@ -817,8 +908,9 @@ async def gather_results(
             ),
         )
         return results
+        
     except Exception as e:
-        print(f"Error occurred: {e}")
+        print_debug(f"Error occurred: {e}")
         logging.error(f"Error occurred: {e}")
         raise
 
@@ -926,8 +1018,8 @@ def from_import(
     appserver, snapshot, infile, batchsize, limit, max_query, retries, with_diag
 ):
     print(f"Setting batch size: {batchsize}")
-    print(f"Setting limit: {limit}")
-    print(f"Setting max querys: {max_query}")
+    print(f"Setting application limit: {limit}")
+    print(f"Setting max querys: {max_query}\n")
 
     test_communication(appserver)
 
@@ -993,18 +1085,24 @@ def from_import(
         except aiohttp.ClientOSError:
             pass
         except Exception as e:
+            print_debug(f"An error occurred: {e}")
             logging.error(f"An error occurred: {e}")
             raise
 
         print(f"End time: {datetime.datetime.now()}")
         logging.info(f"End time: {datetime.datetime.now()}")
 
+        # # Pull details on last hop to analyze delivery
+        # last_hop_device_list = report_df['lastHopDevice'].tolist()
+        # last_hop_address_df = asyncio.run(search_subnet(appserver, snapshot, last_hop_device_list))
+        # last_hop_address_df.to_csv(f"./cache/lastHopDevice.csv", index=False)
+        
         report_df = prepare_report(intent, hosts)
         generate_report(snapshot, report_df, with_diag)
 
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print_debug(f"An error occurred: {e}")
         print(traceback.format_exc())
 
         logging.error(f"An error occurred: {e}")
@@ -1017,58 +1115,61 @@ def from_acls(
     appserver, snapshot, batchsize, limit, max_query, retries, with_diag=False
 ):
     print(f"Setting batch size: {batchsize}")
-    print(f"Setting limit: {limit}")
-    print(f"Setting max querys: {max_query}")
-    if debug:
-        pd.set_option("display.max_rows", None)  # Show all rows
+    print(f"Setting application limit: {limit}")
+    print(f"Setting max querys: {max_query}\n")
+    # if debug:
+    #     pd.set_option("display.max_rows", None)  # Show all rows
 
     try:
-        # Retrieve all possible ACLs where a source or destination is locatable in the model
         test_communication(appserver)
+        # Retrieve all possible ACLs where a source or destination is locatable in the model
+        
+        print("Retrieving ACL Entries...")
         data = nqe_get_hosts_from_acl(acl_query, appserver, snapshot)
-        acls_df = pd.DataFrame(data)
-        if len(acls_df) == 0:
+        print(f"ACL Entries retrieved successfully.")
+        app_df = pd.DataFrame(data)
+        if len(app_df) == 0:
             print("No ACL names found")
             return
-
-        if debug:
-            print(acls_df)
-
-        acls_df.sort_values(by="application")
-
-        # Add region to conform to input specification
-        acls_df["region"] = "Default"
-
-        # Fixup port ranges from input
-        acls_df["dstPorts"] = acls_df["dstPorts"].apply(parse_start_end)
-        acls_df["protocols"] = acls_df["protocols"].apply(parse_start_end)
+        
+        # Add regions and fixup ports
+        app_df.sort_values(by="application")
+        app_df["region"] = "Default"
+        app_df["dstPorts"] = app_df["dstPorts"].apply(parse_start_end)
+        app_df["protocols"] = app_df["protocols"].apply(parse_start_end)
 
         # Fix list
-        for column in acls_df.columns:
-            if acls_df[column].apply(lambda x: isinstance(x, list)).any():
-                acls_df[column] = acls_df[column].apply(tuple)
+        for column in app_df.columns:
+            if app_df[column].apply(lambda x: isinstance(x, list)).any():
+                app_df[column] = app_df[column].apply(tuple)
 
-        acls_df.drop_duplicates(inplace=True)
-        print(f"ACL Entries Found: {limit}/{len(acls_df)}\n")
-
-        # address_df = asyncio.run(search_subnet(appserver, snapshot, acls_df))
-        # print(f"DEBUG: 1044\n {address_df}" )
+        app_df.drop_duplicates(inplace=True)
 
         # add limiter for testing
         if limit:
-            acls_df = acls_df.head(limit)
+            app_df = app_df.head(limit)
+
+        addresses = []
+        for row in app_df.itertuples():
+                    addresses.extend(row.sources)
+                    addresses.extend(row.destinations)
+                    addresses = list(set(addresses))  # remove duplicates
+
+        print(f"ACL Entries Generated/Found: {limit}/{len(data)}, Addresses: {len(addresses)}\n")
+
+        address_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
 
         if debug:
-            print(acls_df)
+            print_debug(address_df)
 
         start_time = datetime.datetime.now()
-        print(f"Start time: {start_time}")
-        logging.info(f"Start time: {start_time}")
+        print(f"\n\nStart processor time: {start_time}")
+        logging.info(f"Start processor time: {start_time}")
         try:
             results = asyncio.run(
                 gather_results(
-                    appserver, snapshot, acls_df, batchsize, max_query, retries
-                )
+                    appserver, snapshot, app_df, batchsize, max_query, retries, address_df
+                ),debug=True
             )
             if results is not None:
                 hosts = pd.DataFrame(results[0])
@@ -1076,21 +1177,32 @@ def from_acls(
                 logging.warning(hosts.columns)
 
         except KeyboardInterrupt:
-            print("Interrupted by user, continuing with available data...")
-            # Get a list of all the csv files
-            hosts = pd.read_csv("./cache/hosts.csv")
-            csv_files = glob.glob("./cache/intent_*.csv")
-            intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+            print_debug("Interrupted by user, continuing with available data...")
+            if os.path.exists("./cache/hosts.csv") and glob.glob("./cache/intent_*.csv"):
+                hosts = pd.read_csv("./cache/hosts.csv")
+                csv_files = glob.glob("./cache/intent_*.csv")
+                intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+            else: 
+                print("Exiting Early")
+                return
         except asyncio.TimeoutError:
-            print("Operation timed out. Recovering from the persisted dataframe...")
-            hosts = pd.read_csv("./cache/hosts.csv")
-            csv_files = glob.glob("./cache/intent_*.csv")
-            intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+            print_debug("Operation timed out. Recovering from the persisted dataframe...")
+            if os.path.exists("./cache/hosts.csv") and glob.glob("./cache/intent_*.csv"):
+                hosts = pd.read_csv("./cache/hosts.csv")
+                csv_files = glob.glob("./cache/intent_*.csv")
+                intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+            else: 
+                print("Exiting Early")
+                return
         except aiohttp.ClientOSError:
-            print("Operation timed out. Recovering from the persisted dataframe...")
-            csv_files = glob.glob("./cache/intent_*.csv")
-            hosts = pd.read_csv("./cache/hosts.csv")
-            intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+            print_debug("Operation timed out. Recovering from the persisted dataframe...")
+            if os.path.exists("./cache/hosts.csv") and glob.glob("./cache/intent_*.csv"):
+                csv_files = glob.glob("./cache/intent_*.csv")
+                hosts = pd.read_csv("./cache/hosts.csv")
+                intent = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+            else: 
+                print("Exiting Early")
+                return
 
         print(f"Collection End: {datetime.datetime.now()}")
         logging.info(f"Collection End: {datetime.datetime.now()}")
@@ -1099,21 +1211,31 @@ def from_acls(
         addresses = list(set([tuple(x) for x in report_df[['srcIp', 'dstIp']].values.tolist()]))
 
         
-        subnets_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
-        subnets_df = subnets_df[subnets_df['origin'] == 'HOST']
-        data_df = pd.json_normalize(subnets_df['data'].apply(pd.Series).stack()).reset_index(drop=True)
-        data_df = pd.concat([subnets_df[['address', 'origin', 'description', 'status']], data_df], axis=1)
+        # subnets_df = asyncio.run(search_subnet(appserver, snapshot, addresses))
+        # subnets_df = subnets_df[subnets_df['origin'] == 'HOST']
+        # if not subnets_df.empty:
+        #     data_df = pd.json_normalize(subnets_df['data'].apply(pd.Series).stack()).reset_index(drop=True)
+        #     data_df = pd.concat([subnets_df[['address', 'origin', 'description', 'status']], data_df], axis=1)        
+        #     data_df.to_csv(f"./cache/subnets.csv", index=False)
+        # else:
+        #     print("No subnet matches founds,,,")
 
-        # print(data_df.iloc[0])
+        # Debug print of report_df columns
         
-        data_df.to_csv(f"./cache/subnets.csv", index=False)
+        # Pull details on last hop to analyze delivery
+        # last_hop_address_df = asyncio.run(search_subnet(appserver, snapshot, list(set(report_df[['lastHopDevice', 'lastHopEgressIntf']].tolist()))))
+        # last_hop_address_df.to_csv(f"./cache/lastHopDevice.csv", index=False)
 
-        print(subnets_df)
+        combined_list = list(set(zip(report_df['lastHopDevice'].tolist(), report_df['lastHopEgressIntf'].tolist())))
+
+        last_hop_address_lookup_df =  asyncio.run(search_interface(appserver, snapshot, combined_list))
+        
+        last_hop_address_lookup_df.to_csv(f"./cache/lastHopDevice.csv", index=False)
 
         generate_report(snapshot, report_df, with_diag)
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print_debug(f"An error occurred: {e}")
         print(traceback.format_exc())
         logging.error(f"An error occurred: {e}")
         logging.error(traceback.format_exc())
@@ -1174,7 +1296,7 @@ def main():
         print("Found existing intent*.csv files in ./cache directory.")
         purge = input("Do you want to purge these results? (yes)/no: ")
         if purge.lower() == "yes" or purge == "":
-            for file in tqdm(csv_files, desc="Purging cache"):
+            for file in tqdm(csv_files, desc="Purging cache\n"):
                 os.remove(file)
         else:
             csv_files = glob.glob("./cache/intent_*.csv")
@@ -1221,4 +1343,8 @@ def main():
         )
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrupted by user. Exiting...")
+        sys.exit(0)
