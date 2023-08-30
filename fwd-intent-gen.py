@@ -1311,7 +1311,7 @@ def from_acls(
             addresses = list(set(addresses))  # remove duplicates
 
         print(
-            f"ACL Entries Generated/Found: {limit}/{len(data)}, Addresses: {len(addresses)}\n"
+            f"ACL Entries Found: {len(data)}, Addresses: {len(addresses)}\n"
         )
 
         asyncio.run(
