@@ -477,11 +477,11 @@ def parse_subnets(data):
             "description": origin_descriptions.get(item.get("origin", "ERROR"), {}).get(
                 "description", "INVALID"
             ),
-            "status": "VALID"
-            if item.get("origin") in ["HOST", "INTERFACE"]
-            else "INVALID"
-            if item.get("origin") in origin_descriptions
-            else "INVALID",
+            "status": "VALID",
+            # if item.get("origin") in ["HOST", "INTERFACE"]
+            # else "INVALID"
+            # if item.get("origin") in origin_descriptions
+            # else "INVALID",
             "data": item.get(
                 origin_descriptions.get(item.get("origin", {}), {}).get("data_key")
             ),
@@ -705,6 +705,8 @@ async def process_input(
                             ]
                         ]
                         body = {"queries": batch_queries, **options}
+                        if debug:
+                            print_debug(batch_queries)
                         url = (
                             f"https://{appserver}/api/snapshots/{snapshot}/pathsBulkSeq"
                         )
