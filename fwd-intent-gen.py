@@ -172,9 +172,7 @@ select distinct { application: b.name, sources: b.src, destinations: b.dst, prot
 host_query = """ 
 foreach device in network.devices
 foreach host in device.hosts
-where length(host.addresses) == 1
 foreach hostSubnet in host.addresses
-where length(hostSubnet) == 32
 foreach interface in host.interfaces
 where host.hostType == DeviceHostType.InferredHost
 select {
@@ -308,33 +306,45 @@ def nqe_get_hosts_from_acl(query, appserver, snapshot):
     limit = 10000
     offset = 0
     items = []
+    total = 0
 
-    while True:
-        body = {"query": query, "queryOptions": {"limit": limit, "offset": offset}}
-        response = requests.post(
-            url, json=body, auth=(username, password), headers=headers, verify=False
-        )
-        response_status = response.status_code
+    if debug:
+        print_debug("calling nqe_get_hosts_from_acl")
 
-        try:
-            response.raise_for_status()
-            response_json = response.json()
+    with tqdm(total=total, dynamic_ncols=True) as pbar:
+        while True:
+            body = {"query": query, "queryOptions": {"limit": limit, "offset": offset}}
             if debug:
-                print_debug(
-                    f"Offset: {offset} Items: {len(response_json['items'])} List: {len(items)}"
+                print_debug(f"{body}, {url}, {headers}, {username}")
+            try:
+                response = requests.post(
+                    url, json=body, auth=(username, password), headers=headers, verify=False
                 )
-            if not response_json["items"]:
+                response_status = response.status_code
+
+                response.raise_for_status()
+                response_json = response.json()
+                if debug:
+                    print_debug(
+                        f"Offset: {offset} Items: {len(response_json['items'])} List: {len(items)}"
+                    )
+                if not response_json["items"]:
+                    break
+                items.extend(response_json["items"])
+                offset += limit
+                pbar.total = offset
+                pbar.update(limit)
+            except requests.exceptions.HTTPError as err:
+                if response_status in [401, 403]:
+                    print_debug(
+                        "Please set FWD_USER and FWD_PASSWORD to authentication credentials"
+                    )
+                elif response_status in [409]:
+                    print_debug("Snapshot is being processed, try again in a few")
+                raise SystemExit(err)
+            except requests.exceptions.ConnectionError as err:
+                print_debug(f"Connection error occurred: {err}")
                 break
-            items.extend(response_json["items"])
-            offset += limit
-        except requests.exceptions.HTTPError as err:
-            if response_status in [401, 403]:
-                print(
-                    "Please set FWD_USER and FWD_PASSWORD to authentication credentials"
-                )
-            elif response_status in [409]:
-                print("Snapshot is being processed, try again in a few")
-            raise SystemExit(err)
 
     return items
 
@@ -381,7 +391,6 @@ def return_firstlast_hop(df):
 
 
 def addForwardingOutcomes(result):
-    print_debug(result)
 
     result["forwardingDescription"] = result["forwardingOutcome"].apply(
         lambda x: forwardingOutcomes[x]["description"]
@@ -455,8 +464,9 @@ def parse_subnets(data):
         "INTERFACE": {"description": "Device Interface", "data_key": "interfaces"},
         "INTERFACE_ATTACHED_SUBNET": {
             "description": "Incorrect device address",
-            "data_key": None,
+            "data_key": "locations",
         },
+        "ROUTE": {"description": "Route", "data_key": "locations"},
         "UNKNOWN": {"description": "UNKNOWN", "data_key": None},
     }
 
@@ -486,6 +496,11 @@ def parse_subnets(data):
         }
         for item in data
     ]
+    if debug:
+        for item in data:
+            print_debug(item)
+        for item in parsed_data:
+            print_debug(item)
 
     return parsed_data
 
@@ -1018,7 +1033,6 @@ async def gather_results(
 
 
 def prepare_report(intent, hosts):
-    print_debug(intent)
     forwarding_outcomes = addForwardingOutcomes(intent)
 
     report_df = return_firstlast_hop(forwarding_outcomes)
@@ -1033,7 +1047,7 @@ def prepare_report(intent, hosts):
             device
             and forwardingOutcome
             and interface
-            and forwardingOutcome not in outcomes
+            # and forwardingOutcome not in outcomes
             and not bool(re.match(r"^self\..*", interface))
         ):
             host = hosts[
@@ -1043,7 +1057,7 @@ def prepare_report(intent, hosts):
                 report_df.at[index, "hostAddress"] = host["Address"].values[0]
                 report_df.at[index, "MacAddress"] = host["MacAddress"].values[0]
                 report_df.at[index, "OUI"] = host["OUI"].values[0]
-                report_df.at[index, "hostInterface"] = host["Interface"].values[0]
+                # report_df.at[index, "hostInterface"] = host["Interface"].values[0]; this would the same, not sure if we should check
                 logging.info(
                     f"Updated host details for device: {device} and interface: {interface}"
                 )
@@ -1055,7 +1069,7 @@ def prepare_report(intent, hosts):
             report_df.at[index, "hostAddress"] = None
             report_df.at[index, "MacAddress"] = None
             report_df.at[index, "OUI"] = None
-            report_df.at[index, "hostInterface"] = None
+            # report_df.at[index, "hostInterface"] = None
             logging.warning(
                 f"No device or interface details found for device: {device} and interface: {interface}"
             )
@@ -1090,8 +1104,7 @@ def generate_report(snapshot, report_df, with_diag=False):
         "lastHopEgressIntf",
         "hostAddress",
         "MacAddress",
-        "OUI",
-        "hostInterface",
+        "OUI"
     ]
 
     # Excel has a max row limit of 1048576
@@ -1274,7 +1287,7 @@ def from_acls(
         test_communication(appserver)
         # Retrieve all possible ACLs where a source or destination is locatable in the model
 
-        print("Retrieving ACL Entries...")
+        print("Retrieving ACL Entries... This can take a while")
         data = nqe_get_hosts_from_acl(acl_query, appserver, snapshot)
         print(f"ACL Entries retrieved successfully.")
         app_df = pd.DataFrame(data)
