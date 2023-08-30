@@ -1030,7 +1030,7 @@ def prepare_report(intent, hosts):
 
     report_df = return_firstlast_hop(forwarding_outcomes)
 
-    for index, row in tqdm(report_df.iterrows(), desc="Processing Data"):
+    for index, _ in tqdm(report_df.iterrows(), desc="Processing Data"):
         device = report_df.at[index, "lastHopDevice"]
         interface = report_df.at[index, "lastHopEgressIntf"]
         forwardingOutcome = report_df.at[index, "forwardingOutcome"]
@@ -1047,9 +1047,10 @@ def prepare_report(intent, hosts):
                 (hosts["deviceName"] == device) & (hosts["Interface"] == interface)
             ]
             if not host.empty:
-                report_df.at[index, "hostAddress"] = host["Address"].values[0]
-                report_df.at[index, "MacAddress"] = host["MacAddress"].values[0]
-                report_df.at[index, "OUI"] = host["OUI"].values[0]
+                print_debug(host['Address'])
+                report_df.at[index, "hostAddress"] = ', '.join(map(str, set(host["Address"].values)))
+                report_df.at[index, "MacAddress"] = ', '.join(map(str, set(host["MacAddress"].values)))
+                report_df.at[index, "OUI"] = ', '.join(map(str, set(host["OUI"].values)))
                 # report_df.at[index, "hostInterface"] = host["Interface"].values[0]; this would the same, not sure if we should check
                 logging.info(
                     f"Updated host details for device: {device} and interface: {interface}"
