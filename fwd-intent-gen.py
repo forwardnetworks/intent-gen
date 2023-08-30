@@ -554,33 +554,7 @@ async def fetch(
                 raise e
 
 
-def fixup_queries(input):
-    if debug:
-        print_debug("calling fixup_queries")
-    queries = []
-    for _, row in input.iterrows():
-        sources = row["sources"]
-        destinations = row["destinations"]
-        protocols = row["protocols"]
-        dstPorts = row["dstPorts"]
 
-        # Convert sources and destinations to dictionary for faster lookup
-        sources_dict = {source: None for source in sources}
-        destinations_dict = {destination: None for destination in destinations}
-
-        for source in sources_dict:
-            for destination in destinations_dict:
-                if source != destination:
-                    query = {
-                        "srcIp": source,
-                        "dstIp": destination,
-                        "ipProto": protocols
-                        if not re.match(r"\s+-\s+", protocols)
-                        else {},
-                        "dstPort": dstPorts if protocols in ["6", "17"] else {},
-                    }
-                    queries.append(query)
-    return queries
 
 
 def error_queries(input, address_df):
@@ -610,7 +584,6 @@ def error_queries(input, address_df):
 
     return error_df
 
-
 def filter_queries(input_df, address_df):
     if debug:
         print_debug("Calling: filter_queries")
@@ -621,7 +594,7 @@ def filter_queries(input_df, address_df):
         ["origin", "description", "status"]
     ].to_dict("index")
 
-    filtered_queries = []
+    queries = []
     for index, row in input_df.iterrows():
         region = row["region"]
         sources = row["sources"]
@@ -635,31 +608,50 @@ def filter_queries(input_df, address_df):
                 if source != destination:
                     source_info = address_dict.get(source, {})
                     dest_info = address_dict.get(destination, {})
+                       # Check if protocols is a range
+                    if '-' in protocols and protocols != '0-255':
+                        start, end = map(int, protocols.split('-'))
+                        for proto in range(start, end + 1):
+                            query = {
+                                "srcIp": source,
+                                "dstIp": destination,
+                                "ipProto": protocols
+                                if not re.match(r"\s+-\s+", protocols)
+                                else {},
+                                "dstPort": dstPorts if str(protocols) in ["6", "17"] else None,
+                                "source_origin": source_info.get("origin"),
+                                "source_description": source_info.get("description"),
+                                "source_status": source_info.get("status"),
+                                "dest_origin": dest_info.get("origin"),
+                                "dest_description": dest_info.get("description"),
+                                "dest_status": dest_info.get("status"),
+                                "region": region,
+                                "application": application,
+                            }
+                            queries.append(query)
+                    else:
+                            query = {
+                                "region": region,
+                                "application": application,
+                                "srcIp": source,
+                                "dstIp": destination,
+                                "dstPort": dstPorts if protocols in ["6", "17"] else None,
+                                "source_origin": source_info.get("origin"),
+                                "source_description": source_info.get("description"),
+                                "source_status": source_info.get("status"),
+                                "dest_origin": dest_info.get("origin"),
+                                "dest_description": dest_info.get("description"),
+                                "dest_status": dest_info.get("status"),
+                            }
+                            if protocols != '0-255':
+                                query["ipProto"] = protocols
+                            queries.append(query)
 
-                    query = {
-                        "srcIp": source,
-                        "dstIp": destination,
-                        "ipProto": protocols
-                        if not re.match(r"\s+-\s+", protocols)
-                        else {},
-                        "dstPort": dstPorts if protocols in ["6", "17"] else {},
-                        "source_origin": source_info.get("origin"),
-                        "source_description": source_info.get("description"),
-                        "source_status": source_info.get("status"),
-                        "dest_origin": dest_info.get("origin"),
-                        "dest_description": dest_info.get("description"),
-                        "dest_status": dest_info.get("status"),
-                        "region": region,
-                        "application": application,
-                    }
-                    filtered_queries.append(query)
+    if debug:
+        for item in queries:
+            print_debug(item)
 
-    # query_list_df = pd.DataFrame(filtered_queries)
-
-    # if debug:
-    #     print_debug(f"\nQueryList\n{query_list_df}")
-
-    return filtered_queries
+    return queries
 
 
 async def process_input(
@@ -669,7 +661,6 @@ async def process_input(
         print_debug("calling process_input")
     try:
         queries = filter_queries(input_df, address_df)
-        # queries = fixup_queries(input_df)
         # configure query limit
         total_queries = min(len(queries), max_query)
         dfs = []  # List to store individual dataframes
@@ -1162,11 +1153,7 @@ async def handler(
                 address_df,
             )
 
-            # if results is not None:
-            #     # hosts = pd.DataFrame(results[0])
-            #     # intent = pd.DataFrame(results[1])
             intent = pd.DataFrame(results)
-            # logging.warning(hosts.columns)
 
             print(f"Collection End: {datetime.datetime.now()}")
             logging.info(f"Collection End: {datetime.datetime.now()}")
@@ -1175,10 +1162,6 @@ async def handler(
             addresses = list(
                 set([tuple(x) for x in report_df[["srcIp", "dstIp"]].values.tolist()])
             )
-            # Pull details on last hop to analyze delivery
-            # last_hop_address_df = asyncio.run(search_subnet(appserver, snapshot, list(set(report_df[['lastHopDevice', 'lastHopEgressIntf']].tolist()))))
-            # last_hop_address_df.to_csv(f"./cache/lastHopDevice.csv", index=False)
-
             combined_list = list(
                 set(
                     zip(
