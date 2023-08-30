@@ -73,6 +73,7 @@ from tqdm import tqdm
 from urllib.parse import quote
 import urllib3
 import inspect
+from ipaddress import ip_network, ip_address
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -1035,6 +1036,7 @@ def prepare_report(intent, hosts):
         interface = report_df.at[index, "lastHopEgressIntf"]
         forwardingOutcome = report_df.at[index, "forwardingOutcome"]
         outcomes = ["DELIVERED", "NOT_DELIVERED"]
+        dstIp = report_df.at[index, "dstIp"]
 
         if (
             device
@@ -1047,10 +1049,13 @@ def prepare_report(intent, hosts):
                 (hosts["deviceName"] == device) & (hosts["Interface"] == interface)
             ]
             if not host.empty:
-                print_debug(host['Address'])
-                report_df.at[index, "hostAddress"] = ', '.join(map(str, set(host["Address"].values)))
+                ipv4_regex = re.compile(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+                report_df.at[index, "hostAddress"] = ', '.join(map(str, [address for address in set(host["Address"].values) if ipv4_regex.match(address)]))
                 report_df.at[index, "MacAddress"] = ', '.join(map(str, set(host["MacAddress"].values)))
                 report_df.at[index, "OUI"] = ', '.join(map(str, set(host["OUI"].values)))
+                
+                report_df.at[index, "TESTLAST"] = True if any(ip_network(dstIp).network_address in ip_network(address) for address in host["Address"].values) else False
+                
                 # report_df.at[index, "hostInterface"] = host["Interface"].values[0]; this would the same, not sure if we should check
                 logging.info(
                     f"Updated host details for device: {device} and interface: {interface}"
@@ -1098,7 +1103,8 @@ def generate_report(snapshot, report_df, with_diag=False):
         "lastHopEgressIntf",
         "hostAddress",
         "MacAddress",
-        "OUI"
+        "OUI",
+        "TESTLAST"
     ]
 
     # Excel has a max row limit of 1048576
