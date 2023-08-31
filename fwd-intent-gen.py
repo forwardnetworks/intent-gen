@@ -63,7 +63,7 @@ import asyncio
 import json
 import os
 from docopt import docopt
-from openpyxl.styles import Font
+# from openpyxl.styles import Font
 from openpyxl import load_workbook
 import requests
 import logging
@@ -164,10 +164,11 @@ group acl as a
        dst: acl.destinations,
        protos: acl.protocols,
        dstPorts: acl.dstports,
-       hostCount: length(hosts)
+       hostCount: length(hosts),
+       action: acl.action
     }
     as b
-select distinct { application: b.name, sources: b.src, destinations: b.dst, protocols: b.protos, dstPorts: b.dstPorts}
+select distinct { application: b.name, sources: b.src, destinations: b.dst, protocols: b.protos, dstPorts: b.dstPorts, action: b.action, hostcount: b.hostCount}
 """
 
 host_query = """ 
@@ -327,7 +328,7 @@ def nqe_get_hosts_from_acl(query, appserver, snapshot):
                 response_json = response.json()
                 if debug:
                     print_debug(
-                        f"Offset: {offset} Items: {len(response_json['items'])} List: {len(items)}"
+                        f"Offset: {offset} Items: {len(response_json['items'])} List: {len(items)} Data: {response_json}"
                     )
                 if not response_json["items"]:
                     break
@@ -603,6 +604,7 @@ def filter_queries(input_df, address_df):
         protocols = row["protocols"]
         dstPorts = row["dstPorts"]
         application = row["application"]
+        action = row["action"]
 
         for source in sources:
             for destination in destinations:
@@ -628,6 +630,7 @@ def filter_queries(input_df, address_df):
                                 "dest_status": dest_info.get("status"),
                                 "region": region,
                                 "application": application,
+                                "Action": action
                             }
                             queries.append(query)
                     else:
@@ -636,6 +639,7 @@ def filter_queries(input_df, address_df):
                                 "application": application,
                                 "srcIp": source,
                                 "dstIp": destination,
+                                "Action": action,
                                 "dstPort": dstPorts if protocols in ["6", "17"] else None,
                                 "source_origin": source_info.get("origin"),
                                 "source_description": source_info.get("description"),
@@ -660,6 +664,8 @@ async def process_input(
 ):
     if debug:
         print_debug("calling process_input")
+
+    
     try:
         queries = filter_queries(input_df, address_df)
         # configure query limit
@@ -752,6 +758,7 @@ async def process_input(
                         )
                         logging.info("paths_df")
                         logging.warning(paths_df.iloc[0])
+
                         merged_df = pd.merge(
                             paths_df,
                             pd.DataFrame(
@@ -830,20 +837,20 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
                 return None
 
 
-async def run_process_input(
-    appserver, snapshot, acls_df, batchsize, max_query, retries=3
-):
-    for retry in range(retries):
-        try:
-            return await process_input(
-                appserver, snapshot, acls_df, batchsize, max_query
-            )
-        except asyncio.TimeoutError:
-            print(f"Timeout error, retrying in {2 ** retry} seconds...")
-            await asyncio.sleep(2**retry)
-            if retry > retries:
-                print("Max retries exceeded. Continuing to next iteration.")
-                continue
+# async def run_process_input(
+#     appserver, snapshot, acls_df, batchsize, max_query, retries=3
+# ):
+#     for retry in range(retries):
+#         try:
+#             return await process_input(
+#                 appserver, snapshot, acls_df, batchsize, max_query
+#             )
+#         except asyncio.TimeoutError:
+#             print(f"Timeout error, retrying in {2 ** retry} seconds...")
+#             await asyncio.sleep(2**retry)
+#             if retry > retries:
+#                 print("Max retries exceeded. Continuing to next iteration.")
+#                 continue
 
 
 async def nqe_get_hosts_by_port_2(session, appserver, snapshot):
@@ -1008,24 +1015,6 @@ async def search_interface(session, appserver, snapshot, devices):
         return pd.DataFrame(df_list)
 
 
-async def gather_results(
-    appserver, snapshot, acls_df, batchsize, max_query, retries, address_df=None
-):
-    try:
-        results = await asyncio.gather(
-            # nqe_get_hosts_by_port_2(appserver, snapshot),
-            process_input(
-                appserver, snapshot, acls_df, batchsize, max_query, address_df
-            ),
-        )
-        return results
-
-    except Exception as e:
-        print_debug(f"Error occurred at line {sys.exc_info()[-1].tb_lineno}: {e}")
-        logging.error(f"Error occurred: {e}")
-        raise
-
-
 def prepare_report(intent, hosts):
     forwarding_outcomes = addForwardingOutcomes(intent)
 
@@ -1104,7 +1093,8 @@ def generate_report(snapshot, report_df, with_diag=False):
         "hostAddress",
         "MacAddress",
         "OUI",
-        "TESTLAST"
+        "TESTLAST",
+        "Action"
     ]
 
     # Excel has a max row limit of 1048576
@@ -1292,11 +1282,7 @@ def from_acls(
         app_df["region"] = "Default"
         app_df["dstPorts"] = app_df["dstPorts"].apply(parse_start_end)
         app_df["protocols"] = app_df["protocols"].apply(parse_start_end)
-
-        # Fix list
-        for column in app_df.columns:
-            if app_df[column].apply(lambda x: isinstance(x, list)).any():
-                app_df[column] = app_df[column].apply(tuple)
+        app_df = app_df.applymap(lambda x: tuple(x) if isinstance(x, list) else x)
 
         app_df.drop_duplicates(inplace=True)
         app_df.to_csv(f"./cache/acls.csv", index=False)
@@ -1304,15 +1290,11 @@ def from_acls(
         if limit:
             app_df = app_df.head(limit)
 
-        addresses = []
-        for row in app_df.itertuples():
-            addresses.extend(row.sources)
-            addresses.extend(row.destinations)
-            addresses = list(set(addresses))  # remove duplicates
+        addresses = pd.unique(pd.concat([app_df['sources'], app_df['destinations']]))
+        num_addresses = len(addresses)
+        num_data = len(data)
 
-        print(
-            f"ACL Entries Found: {len(data)}, Addresses: {len(addresses)}\n"
-        )
+        print(f"ACL Entries Found: {num_data}, Addresses: {num_addresses}\n")
 
         asyncio.run(
             handler(
