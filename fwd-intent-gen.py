@@ -1089,10 +1089,14 @@ def prepare_report(intent, hosts):
             report_df.at[index, "OUI"] = None
             report_df.at[index, "TESTLAST"] = None
             report_df.at[index, "Violation"] = (
-                    True
-                    if  report_df.at[index, "securityOutcome"] !=  report_df.at[index, "Action"]
-                    else False
+                    False
+                    if  (report_df.at[index, "securityOutcome"].lower() == "permitted"
+                    and report_df.at[index, "Action"].lower() == "permit") or
+                    (report_df.at[index, "securityOutcome"].lower() == "denied"
+                    and report_df.at[index, "Action"].lower() == "deny")
+                    else True
                 )
+
 
             # report_df.at[index, "hostInterface"] = None
             logging.warning(
