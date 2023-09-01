@@ -1066,6 +1066,14 @@ def prepare_report(intent, hosts):
                     )
                     else False
                 )
+                report_df.at[index, "Violation"] = (
+                    False
+                    if  (report_df.at[index, "securityOutcome"].lower() == "permitted"
+                    and report_df.at[index, "Action"].lower() == "permit") or
+                    (report_df.at[index, "securityOutcome"].lower() == "denied"
+                    and report_df.at[index, "Action"].lower() == "deny")
+                    else True
+                )
 
                 # report_df.at[index, "hostInterface"] = host["Interface"].values[0]; this would the same, not sure if we should check
                 logging.info(
@@ -1080,6 +1088,12 @@ def prepare_report(intent, hosts):
             report_df.at[index, "MacAddress"] = None
             report_df.at[index, "OUI"] = None
             report_df.at[index, "TESTLAST"] = None
+            report_df.at[index, "Violation"] = (
+                    True
+                    if  report_df.at[index, "securityOutcome"] !=  report_df.at[index, "Action"]
+                    else False
+                )
+
             # report_df.at[index, "hostInterface"] = None
             logging.warning(
                 f"No device or interface details found for device: {device} and interface: {interface}"
@@ -1104,6 +1118,7 @@ def generate_report(snapshot, report_df, with_diag=False):
         "dest_status",
         "forwardingOutcome",
         "securityOutcome",
+        "Violation",
         "srcIpLocationType",
         "dstIpLocationType",
         "pathCount",
@@ -1156,8 +1171,6 @@ async def handler(
     async with aiohttp.ClientSession() as session:
         try:
             address_df = await search_subnet(session, appserver, snapshot, addresses)
-
-            print_debug(address_df)
 
             address_df.to_csv(f"./cache/subnets.csv", index=False)
             hosts = await nqe_get_hosts_by_port_2(session, appserver, snapshot)
