@@ -94,7 +94,8 @@
                     "10.115.5.25"
                 ],
                 "ipProto": "17",
-                "dstPorts": "161"
+                "dstPorts": "161",
+                "action": "permit"
             },
             "SNMP_TRAP": {
                 "source": [
@@ -107,7 +108,8 @@
                     "10.6.143.197"
                 ],
                 "ipProto": "17",
-                "dstPorts": "162"
+                "dstPorts": "162",
+                "action": "permit"
             }
         },
         "APAC": {
@@ -132,7 +134,8 @@
                     "10.117.201.15"
                 ],
                 "ipProto": "17",
-                "dstPorts": "161-162"
+                "dstPorts": "161-162",
+                "action": "permit"
             }
         }
     }

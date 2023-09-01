@@ -63,6 +63,7 @@ import asyncio
 import json
 import os
 from docopt import docopt
+
 # from openpyxl.styles import Font
 from openpyxl import load_workbook
 import requests
@@ -241,6 +242,7 @@ def flatten_input(data):
                     details["destination"],
                     details["ipProto"],
                     details["dstPorts"],
+                    details["action"],
                 ]
             )
     return pd.DataFrame(
@@ -252,6 +254,7 @@ def flatten_input(data):
             "destinations",
             "protocols",
             "dstPorts",
+            "action",
         ],
     )
 
@@ -320,7 +323,11 @@ def nqe_get_hosts_from_acl(query, appserver, snapshot):
                 print_debug(f"{body}, {url}, {headers}, {username}")
             try:
                 response = requests.post(
-                    url, json=body, auth=(username, password), headers=headers, verify=False
+                    url,
+                    json=body,
+                    auth=(username, password),
+                    headers=headers,
+                    verify=False,
                 )
                 response_status = response.status_code
 
@@ -393,7 +400,6 @@ def return_firstlast_hop(df):
 
 
 def addForwardingOutcomes(result):
-
     result["forwardingDescription"] = result["forwardingOutcome"].apply(
         lambda x: forwardingOutcomes[x]["description"]
         if x in forwardingOutcomes
@@ -556,9 +562,6 @@ async def fetch(
                 raise e
 
 
-
-
-
 def error_queries(input, address_df):
     invalid_addresses = set()
 
@@ -586,54 +589,61 @@ def error_queries(input, address_df):
 
     return error_df
 
+
 def filter_queries(input_df, address_df):
     if debug:
         print_debug("Calling: filter_queries")
         print_debug(f"Length of input_df: {len(input_df)}")
+    try:
+        # Flatten the dataframe to have a record for each address in the tuple
+        address_df = address_df.explode('address')
+        address_df = address_df.drop_duplicates(subset='address')
+        # Convert address_df to a dictionary for faster lookup
+        address_dict = address_df.set_index("address")[
+            ["origin", "description", "status"]
+        ].to_dict("index")
 
-    # Convert address_df to a dictionary for faster lookup
-    address_dict = address_df.set_index("address")[
-        ["origin", "description", "status"]
-    ].to_dict("index")
+        queries = []
+        for index, row in input_df.iterrows():
+            region = row["region"]
+            sources = row["sources"]
+            destinations = row["destinations"]
+            protocols = row["protocols"]
+            dstPorts = row["dstPorts"]
+            application = row["application"]
+            action = row["action"]
 
-    queries = []
-    for index, row in input_df.iterrows():
-        region = row["region"]
-        sources = row["sources"]
-        destinations = row["destinations"]
-        protocols = row["protocols"]
-        dstPorts = row["dstPorts"]
-        application = row["application"]
-        action = row["action"]
+            for source in sources:
+                for destination in destinations:
+                    if source != destination:
+                        source_info = address_dict.get(source, {})
+                        dest_info = address_dict.get(destination, {})
 
-        for source in sources:
-            for destination in destinations:
-                if source != destination:
-                    source_info = address_dict.get(source, {})
-                    dest_info = address_dict.get(destination, {})
-                       # Check if protocols is a range
-                    if '-' in protocols and protocols != '0-255':
-                        start, end = map(int, protocols.split('-'))
-                        for proto in range(start, end + 1):
-                            query = {
-                                "srcIp": source,
-                                "dstIp": destination,
-                                "ipProto": protocols
-                                if not re.match(r"\s+-\s+", protocols)
-                                else {},
-                                "dstPort": dstPorts if str(protocols) in ["6", "17"] else None,
-                                "source_origin": source_info.get("origin"),
-                                "source_description": source_info.get("description"),
-                                "source_status": source_info.get("status"),
-                                "dest_origin": dest_info.get("origin"),
-                                "dest_description": dest_info.get("description"),
-                                "dest_status": dest_info.get("status"),
-                                "region": region,
-                                "application": application,
-                                "Action": action
-                            }
-                            queries.append(query)
-                    else:
+                        # Check if protocols is a range
+                        if "-" in protocols and protocols != "0-255":
+                            start, end = map(int, protocols.split("-"))
+                            for proto in range(start, end + 1):
+                                query = {
+                                    "srcIp": source,
+                                    "dstIp": destination,
+                                    "ipProto": protocols
+                                    if not re.match(r"\s+-\s+", protocols)
+                                    else {},
+                                    "dstPort": dstPorts
+                                    if str(protocols) in ["6", "17"]
+                                    else None,
+                                    "source_origin": source_info.get("origin"),
+                                    "source_description": source_info.get("description"),
+                                    "source_status": source_info.get("status"),
+                                    "dest_origin": dest_info.get("origin"),
+                                    "dest_description": dest_info.get("description"),
+                                    "dest_status": dest_info.get("status"),
+                                    "region": region,
+                                    "application": application,
+                                    "Action": action,
+                                }
+                                queries.append(query)
+                        else:
                             query = {
                                 "region": region,
                                 "application": application,
@@ -648,9 +658,13 @@ def filter_queries(input_df, address_df):
                                 "dest_description": dest_info.get("description"),
                                 "dest_status": dest_info.get("status"),
                             }
-                            if protocols != '0-255':
+                            if protocols != "0-255":
                                 query["ipProto"] = protocols
                             queries.append(query)
+    except Exception as e:
+            raise e
+            print_debug(f"An error occurred while creating address_dict1: {e}")
+
 
     if debug:
         for item in queries:
@@ -665,7 +679,6 @@ async def process_input(
     if debug:
         print_debug("calling process_input")
 
-    
     try:
         queries = filter_queries(input_df, address_df)
         # configure query limit
@@ -779,6 +792,7 @@ async def process_input(
             return pd.concat(dfs, ignore_index=True)
     except Exception as e:
         print(f"An error occurred at line {sys.exc_info()[-1].tb_lineno}: {e}")
+        raise e
         return None
 
 
@@ -835,22 +849,6 @@ async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
             else:
                 print(f"Error: {err}")
                 return None
-
-
-# async def run_process_input(
-#     appserver, snapshot, acls_df, batchsize, max_query, retries=3
-# ):
-#     for retry in range(retries):
-#         try:
-#             return await process_input(
-#                 appserver, snapshot, acls_df, batchsize, max_query
-#             )
-#         except asyncio.TimeoutError:
-#             print(f"Timeout error, retrying in {2 ** retry} seconds...")
-#             await asyncio.sleep(2**retry)
-#             if retry > retries:
-#                 print("Max retries exceeded. Continuing to next iteration.")
-#                 continue
 
 
 async def nqe_get_hosts_by_port_2(session, appserver, snapshot):
@@ -1016,6 +1014,10 @@ async def search_interface(session, appserver, snapshot, devices):
 
 
 def prepare_report(intent, hosts):
+    if intent.empty:
+        print("Intent is empty. Exiting early.")
+        return
+
     forwarding_outcomes = addForwardingOutcomes(intent)
 
     report_df = return_firstlast_hop(forwarding_outcomes)
@@ -1038,13 +1040,33 @@ def prepare_report(intent, hosts):
                 (hosts["deviceName"] == device) & (hosts["Interface"] == interface)
             ]
             if not host.empty:
-                ipv4_regex = re.compile(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
-                report_df.at[index, "hostAddress"] = ', '.join(map(str, [address for address in set(host["Address"].values) if ipv4_regex.match(address)]))
-                report_df.at[index, "MacAddress"] = ', '.join(map(str, set(host["MacAddress"].values)))
-                report_df.at[index, "OUI"] = ', '.join(map(str, set(host["OUI"].values)))
-                
-                report_df.at[index, "TESTLAST"] = True if any(ip_network(dstIp).network_address in ip_network(address) for address in host["Address"].values) else False
-                
+                ipv4_regex = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+                report_df.at[index, "hostAddress"] = ", ".join(
+                    map(
+                        str,
+                        [
+                            address
+                            for address in set(host["Address"].values)
+                            if ipv4_regex.match(address)
+                        ],
+                    )
+                )
+                report_df.at[index, "MacAddress"] = ", ".join(
+                    map(str, set(host["MacAddress"].values))
+                )
+                report_df.at[index, "OUI"] = ", ".join(
+                    map(str, set(host["OUI"].values))
+                )
+
+                report_df.at[index, "TESTLAST"] = (
+                    True
+                    if any(
+                        ip_network(dstIp).network_address in ip_network(address)
+                        for address in host["Address"].values
+                    )
+                    else False
+                )
+
                 # report_df.at[index, "hostInterface"] = host["Interface"].values[0]; this would the same, not sure if we should check
                 logging.info(
                     f"Updated host details for device: {device} and interface: {interface}"
@@ -1057,6 +1079,7 @@ def prepare_report(intent, hosts):
             report_df.at[index, "hostAddress"] = None
             report_df.at[index, "MacAddress"] = None
             report_df.at[index, "OUI"] = None
+            report_df.at[index, "TESTLAST"] = None
             # report_df.at[index, "hostInterface"] = None
             logging.warning(
                 f"No device or interface details found for device: {device} and interface: {interface}"
@@ -1094,7 +1117,7 @@ def generate_report(snapshot, report_df, with_diag=False):
         "MacAddress",
         "OUI",
         "TESTLAST",
-        "Action"
+        "Action",
     ]
 
     # Excel has a max row limit of 1048576
@@ -1133,6 +1156,9 @@ async def handler(
     async with aiohttp.ClientSession() as session:
         try:
             address_df = await search_subnet(session, appserver, snapshot, addresses)
+
+            print_debug(address_df)
+
             address_df.to_csv(f"./cache/subnets.csv", index=False)
             hosts = await nqe_get_hosts_by_port_2(session, appserver, snapshot)
 
@@ -1232,9 +1258,11 @@ def from_import(
         app_df.sort_values(by="application")
 
         # Fix list
-        for column in app_df.columns:
-            if app_df[column].apply(lambda x: isinstance(x, list)).any():
-                app_df[column] = app_df[column].apply(tuple)
+        # for column in app_df.columns:
+        #     if app_df[column].apply(lambda x: isinstance(x, list)).any():
+        #         app_df[column] = app_df[column].apply(tuple)
+
+        app_df = app_df.applymap(lambda x: tuple(x) if isinstance(x, list) else x)
 
         app_df.drop_duplicates(inplace=True)
         print(f"APP Entries Found: {len(app_df)}\n")
@@ -1245,16 +1273,16 @@ def from_import(
             app_df = app_df.head(limit)
 
         asyncio.run(
-                handler(
-                    appserver,
-                    snapshot,
-                    addresses,
-                    app_df,
-                    batchsize,
-                    max_query,
-                    with_diag,
-                )
+            handler(
+                appserver,
+                snapshot,
+                addresses,
+                app_df,
+                batchsize,
+                max_query,
+                with_diag,
             )
+        )
 
 
 def from_acls(
@@ -1282,6 +1310,11 @@ def from_acls(
         app_df["region"] = "Default"
         app_df["dstPorts"] = app_df["dstPorts"].apply(parse_start_end)
         app_df["protocols"] = app_df["protocols"].apply(parse_start_end)
+
+        #  # Fix list
+        # for column in app_df.columns:
+        #     if app_df[column].apply(lambda x: isinstance(x, list)).any():
+        #         app_df[column] = app_df[column].apply(tuple)
         app_df = app_df.applymap(lambda x: tuple(x) if isinstance(x, list) else x)
 
         app_df.drop_duplicates(inplace=True)
@@ -1290,7 +1323,11 @@ def from_acls(
         if limit:
             app_df = app_df.head(limit)
 
-        addresses = pd.unique(pd.concat([app_df['sources'], app_df['destinations']]))
+        addresses = []
+        for row in app_df.itertuples():
+            addresses.extend(row.sources)
+            addresses.extend(row.destinations)
+        addresses = pd.unique(pd.concat([app_df["sources"], app_df["destinations"]]))
         num_addresses = len(addresses)
         num_data = len(data)
 
