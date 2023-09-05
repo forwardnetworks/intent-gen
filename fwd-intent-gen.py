@@ -1058,7 +1058,7 @@ def prepare_report(intent, hosts):
                     map(str, set(host["OUI"].values))
                 )
 
-                report_df.at[index, "TESTLAST"] = (
+                report_df.at[index, "Accepted"] = (
                     True
                     if any(
                         ip_network(dstIp).network_address in ip_network(address)
@@ -1083,12 +1083,11 @@ def prepare_report(intent, hosts):
                 logging.warning(
                     f"No host details found for device: {device} and interface: {interface}"
                 )
-        else:
-            report_df.at[index, "hostAddress"] = None
-            report_df.at[index, "MacAddress"] = None
-            report_df.at[index, "OUI"] = None
-            report_df.at[index, "TESTLAST"] = None
-            report_df.at[index, "Violation"] = (
+                report_df.at[index, "hostAddress"] = None
+                report_df.at[index, "MacAddress"] = None
+                report_df.at[index, "OUI"] = None
+                report_df.at[index, "Accepted"] = False
+                report_df.at[index, "Violation"] = (
                     False
                     if  (report_df.at[index, "securityOutcome"].lower() == "permitted"
                     and report_df.at[index, "Action"].lower() == "permit") or
@@ -1097,7 +1096,19 @@ def prepare_report(intent, hosts):
                     else True
                 )
 
-
+        else:
+            report_df.at[index, "hostAddress"] = None
+            report_df.at[index, "MacAddress"] = None
+            report_df.at[index, "OUI"] = None
+            report_df.at[index, "Accepted"] = False
+            report_df.at[index, "Violation"] = (
+                    False
+                    if  (report_df.at[index, "securityOutcome"].lower() == "permitted"
+                    and report_df.at[index, "Action"].lower() == "permit") or
+                    (report_df.at[index, "securityOutcome"].lower() == "denied"
+                    and report_df.at[index, "Action"].lower() == "deny")
+                    else True
+                )
             # report_df.at[index, "hostInterface"] = None
             logging.warning(
                 f"No device or interface details found for device: {device} and interface: {interface}"
@@ -1135,7 +1146,7 @@ def generate_report(snapshot, report_df, with_diag=False):
         "hostAddress",
         "MacAddress",
         "OUI",
-        "TESTLAST",
+        "Accepted",
         "Action",
     ]
 
