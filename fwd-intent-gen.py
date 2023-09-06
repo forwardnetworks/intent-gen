@@ -211,6 +211,33 @@ headers = {
 # Utilities
 
 
+def getDisposition(
+    dstIp, hosts, egressInterface, dstIpLocationType, securityOutcome, forwardingOutcome, dest_status
+):
+    if (forwardingOutcome == "DELIVERED_TO_INCORRECT_LOCATION"
+        and dest_status == "VALID"):
+        return "INSUFFICIENT_INFO"
+    elif any(
+        ip_network(dstIp).network_address in ip_network(address) for address in hosts
+    ):
+        return "ACCEPTED"
+    elif (
+        dstIpLocationType == "INTERFACE_ATTACHED_SUBNET"
+        and forwardingOutcome == "DELIVERED"
+        and securityOutcome == "PERMITTED"
+    ):
+        return "DELIVERED_TO_SUBNET"
+    elif (
+        egressInterface == "self"
+        and forwardingOutcome == "DELIVERED"
+        and securityOutcome == "PERMITTED"
+        and dstIpLocationType == "INTERFACE"
+    ):
+        return "ACCEPTED"
+    else:
+        return "UNKNOWN"
+
+
 def print_debug(message):
     print(
         f"{datetime.datetime.now()} Debug on line {inspect.currentframe().f_back.f_lineno}: {message}"
@@ -471,7 +498,7 @@ def parse_subnets(data):
         },
         "INTERFACE": {"description": "Device Interface", "data_key": "interfaces"},
         "INTERFACE_ATTACHED_SUBNET": {
-            "description": "Incorrect device address",
+            "description": "Packet delivered to subnet",
             "data_key": "locations",
         },
         "ROUTE": {"description": "Route", "data_key": "locations"},
@@ -596,8 +623,8 @@ def filter_queries(input_df, address_df):
         print_debug(f"Length of input_df: {len(input_df)}")
     try:
         # Flatten the dataframe to have a record for each address in the tuple
-        address_df = address_df.explode('address')
-        address_df = address_df.drop_duplicates(subset='address')
+        address_df = address_df.explode("address")
+        address_df = address_df.drop_duplicates(subset="address")
         # Convert address_df to a dictionary for faster lookup
         address_dict = address_df.set_index("address")[
             ["origin", "description", "status"]
@@ -633,14 +660,16 @@ def filter_queries(input_df, address_df):
                                     if str(protocols) in ["6", "17"]
                                     else None,
                                     "source_origin": source_info.get("origin"),
-                                    "source_description": source_info.get("description"),
+                                    "source_description": source_info.get(
+                                        "description"
+                                    ),
                                     "source_status": source_info.get("status"),
                                     "dest_origin": dest_info.get("origin"),
                                     "dest_description": dest_info.get("description"),
                                     "dest_status": dest_info.get("status"),
                                     "region": region,
                                     "application": application,
-                                    "Action": action,
+                                    "AclAction": action,
                                 }
                                 queries.append(query)
                         else:
@@ -649,8 +678,10 @@ def filter_queries(input_df, address_df):
                                 "application": application,
                                 "srcIp": source,
                                 "dstIp": destination,
-                                "Action": action,
-                                "dstPort": dstPorts if protocols in ["6", "17"] else None,
+                                "AclAction": action,
+                                "dstPort": dstPorts
+                                if protocols in ["6", "17"]
+                                else None,
                                 "source_origin": source_info.get("origin"),
                                 "source_description": source_info.get("description"),
                                 "source_status": source_info.get("status"),
@@ -662,9 +693,8 @@ def filter_queries(input_df, address_df):
                                 query["ipProto"] = protocols
                             queries.append(query)
     except Exception as e:
-            raise e
-            print_debug(f"An error occurred while creating address_dict1: {e}")
-
+        raise e
+        print_debug(f"An error occurred while creating address_dict1: {e}")
 
     if debug:
         for item in queries:
@@ -886,7 +916,7 @@ async def nqe_get_hosts_by_port_2(session, appserver, snapshot):
         else:
             print(f"Error: {response_status} {response_text}")
             continue
-    print_debug(f"Completed gathering hosts {len(items)}")
+    print(f"Completed gathering hosts {len(items)}")
     df = pd.DataFrame(items)
     df.to_csv("./cache/hosts.csv")
     return df
@@ -1017,30 +1047,33 @@ def prepare_report(intent, hosts):
     if intent.empty:
         print("Intent is empty. Exiting early.")
         return
-
     forwarding_outcomes = addForwardingOutcomes(intent)
 
     report_df = return_firstlast_hop(forwarding_outcomes)
 
     for index, _ in tqdm(report_df.iterrows(), desc="Processing Data"):
         device = report_df.at[index, "lastHopDevice"]
-        interface = report_df.at[index, "lastHopEgressIntf"]
+        egressInterface = report_df.at[index, "lastHopEgressIntf"]
+        dstIpLocationType = report_df.at[index, "dstIpLocationType"]
         forwardingOutcome = report_df.at[index, "forwardingOutcome"]
+        securityOutcome = report_df.at[index, "securityOutcome"]
+        dest_status = report_df.at[index, "dest_status"]
         outcomes = ["DELIVERED", "NOT_DELIVERED"]
         dstIp = report_df.at[index, "dstIp"]
 
         if (
             device
             and forwardingOutcome
-            and interface
-            # and forwardingOutcome not in outcomes
-            and not bool(re.match(r"^self\..*", interface))
+            and egressInterface
+            and not bool(re.match(r"^self\..*", egressInterface))
         ):
             host = hosts[
-                (hosts["deviceName"] == device) & (hosts["Interface"] == interface)
+                (hosts["deviceName"] == device)
+                & (hosts["Interface"] == egressInterface)
             ]
             if not host.empty:
                 ipv4_regex = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+
                 report_df.at[index, "hostAddress"] = ", ".join(
                     map(
                         str,
@@ -1057,42 +1090,59 @@ def prepare_report(intent, hosts):
                 report_df.at[index, "OUI"] = ", ".join(
                     map(str, set(host["OUI"].values))
                 )
-
-                report_df.at[index, "Accepted"] = (
-                    True
-                    if any(
-                        ip_network(dstIp).network_address in ip_network(address)
-                        for address in host["Address"].values
-                    )
-                    else False
+                report_df.at[index, "Disposition"] = getDisposition(
+                    dstIp,
+                    host["Address"].values,
+                    egressInterface,
+                    dstIpLocationType,
+                    securityOutcome,
+                    forwardingOutcome,
+                    dest_status
                 )
                 report_df.at[index, "Violation"] = (
                     False
-                    if  (report_df.at[index, "securityOutcome"].lower() == "permitted"
-                    and report_df.at[index, "Action"].lower() == "permit") or
-                    (report_df.at[index, "securityOutcome"].lower() == "denied"
-                    and report_df.at[index, "Action"].lower() == "deny")
+                    if (
+                        report_df.at[index, "securityOutcome"].lower() == "permitted"
+                        and report_df.at[index, "AclAction"].lower() == "permit"
+                    )
+                    or (
+                        report_df.at[index, "securityOutcome"].lower() == "denied"
+                        and report_df.at[index, "AclAction"].lower() == "deny"
+                    )
                     else True
                 )
 
                 # report_df.at[index, "hostInterface"] = host["Interface"].values[0]; this would the same, not sure if we should check
                 logging.info(
-                    f"Updated host details for device: {device} and interface: {interface}"
+                    f"Updated host details for device: {device} and interface: {egressInterface}"
                 )
             else:
                 logging.warning(
-                    f"No host details found for device: {device} and interface: {interface}"
+                    f"No host details found for device: {device} and interface: {egressInterface}"
                 )
                 report_df.at[index, "hostAddress"] = None
                 report_df.at[index, "MacAddress"] = None
                 report_df.at[index, "OUI"] = None
-                report_df.at[index, "Accepted"] = False
+                report_df.at[index, "Disposition"] = getDisposition(
+                    dstIp,
+                    host["Address"].values,
+                    egressInterface,
+                    dstIpLocationType,
+                    securityOutcome,
+                    forwardingOutcome,
+                    dest_status
+                )
+                # report_df.at[index, "Disposition"] = False
                 report_df.at[index, "Violation"] = (
                     False
-                    if  (report_df.at[index, "securityOutcome"].lower() == "permitted"
-                    and report_df.at[index, "Action"].lower() == "permit") or
-                    (report_df.at[index, "securityOutcome"].lower() == "denied"
-                    and report_df.at[index, "Action"].lower() == "deny")
+                    if (
+                        report_df.at[index, "securityOutcome"].lower() == "permitted"
+                        and report_df.at[index, "AclAction"].lower() == "permit"
+                    )
+                    or (
+                        report_df.at[index, "securityOutcome"].lower() == "denied"
+                        and report_df.at[index, "AclAction"].lower() == "deny"
+                    )
                     else True
                 )
 
@@ -1100,18 +1150,31 @@ def prepare_report(intent, hosts):
             report_df.at[index, "hostAddress"] = None
             report_df.at[index, "MacAddress"] = None
             report_df.at[index, "OUI"] = None
-            report_df.at[index, "Accepted"] = False
+            # report_df.at[index, "Disposition"] = False
+            report_df.at[index, "Disposition"] = getDisposition(
+                dstIp,
+                host["Address"].values,
+                egressInterface,
+                dstIpLocationType,
+                securityOutcome,
+                forwardingOutcome,
+                dest_status
+            )
             report_df.at[index, "Violation"] = (
-                    False
-                    if  (report_df.at[index, "securityOutcome"].lower() == "permitted"
-                    and report_df.at[index, "Action"].lower() == "permit") or
-                    (report_df.at[index, "securityOutcome"].lower() == "denied"
-                    and report_df.at[index, "Action"].lower() == "deny")
-                    else True
+                False
+                if (
+                    report_df.at[index, "securityOutcome"].lower() == "permitted"
+                    and report_df.at[index, "AclAction"].lower() == "permit"
                 )
+                or (
+                    report_df.at[index, "securityOutcome"].lower() == "denied"
+                    and report_df.at[index, "AclAction"].lower() == "deny"
+                )
+                else True
+            )
             # report_df.at[index, "hostInterface"] = None
             logging.warning(
-                f"No device or interface details found for device: {device} and interface: {interface}"
+                f"No device or interface details found for device: {device} and interface: {egressInterface}"
             )
 
     return report_df
@@ -1134,20 +1197,20 @@ def generate_report(snapshot, report_df, with_diag=False):
         "forwardingOutcome",
         "securityOutcome",
         "Violation",
+        "Disposition",
+        "AclAction",
         "srcIpLocationType",
         "dstIpLocationType",
-        "pathCount",
-        "forwardHops",
-        "returnPathCount",
-        "returnHops",
         "firstHopDevice",
         "lastHopDevice",
         "lastHopEgressIntf",
         "hostAddress",
         "MacAddress",
         "OUI",
-        "Accepted",
-        "Action",
+        "pathCount",
+        "forwardHops",
+        "returnPathCount",
+        "returnHops",
     ]
 
     # Excel has a max row limit of 1048576
@@ -1203,13 +1266,13 @@ async def handler(
                 max_query,
                 address_df,
             )
-
             intent = pd.DataFrame(results)
 
             print(f"Collection End: {datetime.datetime.now()}")
             logging.info(f"Collection End: {datetime.datetime.now()}")
 
             report_df = prepare_report(intent, hosts)
+
             addresses = list(
                 set([tuple(x) for x in report_df[["srcIp", "dstIp"]].values.tolist()])
             )
@@ -1451,6 +1514,7 @@ def main():
             hosts = pd.read_csv("./cache/hosts.csv")
 
             report_df = prepare_report(intent, hosts)
+
             generate_report(snapshot, report_df, with_diag)
             return
 
