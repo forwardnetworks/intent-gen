@@ -268,7 +268,7 @@ def getDiagnostic(
             shadowed = True
             break
     if shadowed:
-        return "SHADOWED"
+        return "SHADOWED_ACL"
     else:
         return "NONE"
 
