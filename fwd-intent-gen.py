@@ -227,7 +227,7 @@ def getDisposition(
         and dest_status == "VALID"
     ):
         return "INSUFFICIENT_INFO"
-    elif any(
+    elif hosts is not None and any(
         ip_network(dstIp).network_address in ip_network(address) for address in hosts
     ):
         return "ACCEPTED"
@@ -1204,7 +1204,7 @@ def prepare_report(intent, hosts, app_df):
                 )
                 report_df.at[index, "Diagnostic"] = getDiagnostic(
                     dstIp,
-                    host["Address"].values,
+                    None,
                     egressInterface,
                     dstIpLocationType,
                     securityOutcome,
@@ -1223,7 +1223,7 @@ def prepare_report(intent, hosts, app_df):
             # report_df.at[index, "Disposition"] = False
             report_df.at[index, "Disposition"] = getDisposition(
                 dstIp,
-                host["Address"].values,
+                None,
                 egressInterface,
                 dstIpLocationType,
                 securityOutcome,
@@ -1244,7 +1244,7 @@ def prepare_report(intent, hosts, app_df):
             )
             report_df.at[index, "Diagnostic"] = getDiagnostic(
                     dstIp,
-                    host["Address"].values,
+                    None,
                     egressInterface,
                     dstIpLocationType,
                     securityOutcome,
