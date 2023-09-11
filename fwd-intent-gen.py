@@ -144,7 +144,8 @@ getAcl =
                        PERMIT -> "PERMIT",
     protocols: (foreach t in aclEntry.headerMatches.ipProtocol select {start: t.start, end: t.end}),
     dstports: (foreach p in aclEntry.headerMatches.tpDst select {start: p.start, end: p.end}),
-    name: aclEntry.name
+    name: aclEntry.name,
+    device: device.name
   };
 
 getHosts =
@@ -166,10 +167,11 @@ group acl as a
        protos: acl.protocols,
        dstPorts: acl.dstports,
        hostCount: length(hosts),
-       action: acl.action
+       action: acl.action,
+       device: acl.device
     }
     as b
-select distinct { application: b.name, sources: b.src, destinations: b.dst, protocols: b.protos, dstPorts: b.dstPorts, action: b.action, hostcount: b.hostCount}
+select distinct { application: b.name, sources: b.src, destinations: b.dst, protocols: b.protos, dstPorts: b.dstPorts, action: b.action, hostcount: b.hostCount, device: b.device}
 """
 
 host_query = """ 
@@ -212,10 +214,18 @@ headers = {
 
 
 def getDisposition(
-    dstIp, hosts, egressInterface, dstIpLocationType, securityOutcome, forwardingOutcome, dest_status
+    dstIp,
+    hosts,
+    egressInterface,
+    dstIpLocationType,
+    securityOutcome,
+    forwardingOutcome,
+    dest_status,
 ):
-    if (forwardingOutcome == "DELIVERED_TO_INCORRECT_LOCATION"
-        and dest_status == "VALID"):
+    if (
+        forwardingOutcome == "DELIVERED_TO_INCORRECT_LOCATION"
+        and dest_status == "VALID"
+    ):
         return "INSUFFICIENT_INFO"
     elif any(
         ip_network(dstIp).network_address in ip_network(address) for address in hosts
@@ -236,6 +246,31 @@ def getDisposition(
         return "ACCEPTED"
     else:
         return "UNKNOWN"
+
+
+def getDiagnostic(
+    dstIp,
+    hosts,
+    egressInterface,
+    dstIpLocationType,
+    securityOutcome,
+    forwardingOutcome,
+    dest_status,
+    behaviors,
+    app_df,
+    violation,
+    aclAction
+):
+
+    shadowed = False
+    for behavior in behaviors:
+        if behavior[1] == "ACL_DENY" and violation == True:
+            shadowed = True
+            break
+    if shadowed:
+        return "SHADOWED"
+    else:
+        return "NONE"
 
 
 def print_debug(message):
@@ -290,14 +325,14 @@ def remove_columns_df(df, columns):
     return df.drop(columns, axis=1)
 
 
-def update_font(f):
-    workbook = load_workbook(f)
-    worksheet = workbook.active
-    font = Font(size=14)  # Set font size to 14
-    for row in worksheet.iter_rows():
-        for cell in row:
-            cell.font = font
-    workbook.save(f)
+# def update_font(f):
+#     workbook = load_workbook(f)
+#     worksheet = workbook.active
+#     font = Font(size=14)  # Set font size to 14
+#     for row in worksheet.iter_rows():
+#         for cell in row:
+#             cell.font = font
+#     workbook.save(f)
 
 
 def remove_columns(data, columns_to_remove):
@@ -406,6 +441,7 @@ def return_firstlast_hop(df):
         new_df["lastHopDevice"],
         new_df["lastHopDeviceType"],
         new_df["lastHopEgressIntf"],
+        new_df["ACLS"],
     ) = zip(
         *new_df["hops"].apply(
             lambda hops: (
@@ -414,12 +450,18 @@ def return_firstlast_hop(df):
                 hops[-1]["deviceName"],
                 hops[-1]["deviceType"],
                 hops[-1].get("egressInterface"),
+                [
+                    (hop["deviceName"], behavior)
+                    for hop in hops
+                    if "behaviors" in hop
+                    for behavior in hop["behaviors"]
+                    if behavior in ["ACL_PERMIT", "ACL_DENY"]
+                ],
             )
             if isinstance(hops, list) and len(hops) > 0
-            else (None, None, None, None, None)
+            else (None, None, None, None, None, [])
         )
     )
-
     # Remove the "hops" column
     new_df = new_df.drop(columns=["hops"])
 
@@ -694,7 +736,7 @@ def filter_queries(input_df, address_df):
                             queries.append(query)
     except Exception as e:
         raise e
-        print_debug(f"An error occurred while creating address_dict1: {e}")
+        # print_debug(f"An error occurred while creating address_dict1: {e}")
 
     if debug:
         for item in queries:
@@ -1043,7 +1085,7 @@ async def search_interface(session, appserver, snapshot, devices):
         return pd.DataFrame(df_list)
 
 
-def prepare_report(intent, hosts):
+def prepare_report(intent, hosts, app_df):
     if intent.empty:
         print("Intent is empty. Exiting early.")
         return
@@ -1058,8 +1100,10 @@ def prepare_report(intent, hosts):
         forwardingOutcome = report_df.at[index, "forwardingOutcome"]
         securityOutcome = report_df.at[index, "securityOutcome"]
         dest_status = report_df.at[index, "dest_status"]
+        behaviors = report_df.at[index, "ACLS"]
         outcomes = ["DELIVERED", "NOT_DELIVERED"]
         dstIp = report_df.at[index, "dstIp"]
+        aclAction = report_df.at[index, "AclAction"]
 
         if (
             device
@@ -1090,6 +1134,7 @@ def prepare_report(intent, hosts):
                 report_df.at[index, "OUI"] = ", ".join(
                     map(str, set(host["OUI"].values))
                 )
+
                 report_df.at[index, "Disposition"] = getDisposition(
                     dstIp,
                     host["Address"].values,
@@ -1097,7 +1142,7 @@ def prepare_report(intent, hosts):
                     dstIpLocationType,
                     securityOutcome,
                     forwardingOutcome,
-                    dest_status
+                    dest_status,
                 )
                 report_df.at[index, "Violation"] = (
                     False
@@ -1110,6 +1155,19 @@ def prepare_report(intent, hosts):
                         and report_df.at[index, "AclAction"].lower() == "deny"
                     )
                     else True
+                )
+                report_df.at[index, "Diagnostic"] = getDiagnostic(
+                    dstIp,
+                    host["Address"].values,
+                    egressInterface,
+                    dstIpLocationType,
+                    securityOutcome,
+                    forwardingOutcome,
+                    dest_status,
+                    behaviors,
+                    app_df,
+                    report_df.at[index, "Violation"],
+                    aclAction
                 )
 
                 # report_df.at[index, "hostInterface"] = host["Interface"].values[0]; this would the same, not sure if we should check
@@ -1130,9 +1188,8 @@ def prepare_report(intent, hosts):
                     dstIpLocationType,
                     securityOutcome,
                     forwardingOutcome,
-                    dest_status
+                    dest_status,
                 )
-                # report_df.at[index, "Disposition"] = False
                 report_df.at[index, "Violation"] = (
                     False
                     if (
@@ -1144,6 +1201,19 @@ def prepare_report(intent, hosts):
                         and report_df.at[index, "AclAction"].lower() == "deny"
                     )
                     else True
+                )
+                report_df.at[index, "Diagnostic"] = getDiagnostic(
+                    dstIp,
+                    host["Address"].values,
+                    egressInterface,
+                    dstIpLocationType,
+                    securityOutcome,
+                    forwardingOutcome,
+                    dest_status,
+                    behaviors,
+                    app_df,
+                    report_df.at[index, "Violation"],
+                    aclAction
                 )
 
         else:
@@ -1158,7 +1228,7 @@ def prepare_report(intent, hosts):
                 dstIpLocationType,
                 securityOutcome,
                 forwardingOutcome,
-                dest_status
+                dest_status,
             )
             report_df.at[index, "Violation"] = (
                 False
@@ -1172,11 +1242,68 @@ def prepare_report(intent, hosts):
                 )
                 else True
             )
+            report_df.at[index, "Diagnostic"] = getDiagnostic(
+                    dstIp,
+                    host["Address"].values,
+                    egressInterface,
+                    dstIpLocationType,
+                    securityOutcome,
+                    forwardingOutcome,
+                    dest_status,
+                    behaviors,
+                    app_df,
+                    report_df.at[index, "Violation"],
+                    aclAction
+                )
             # report_df.at[index, "hostInterface"] = None
             logging.warning(
                 f"No device or interface details found for device: {device} and interface: {egressInterface}"
             )
 
+    return report_df
+
+def prepare_report2(intent, hosts, app_df):
+    if intent.empty:
+        print("Intent is empty. Exiting early.")
+        return
+    forwarding_outcomes = addForwardingOutcomes(intent)
+    report_df = return_firstlast_hop(forwarding_outcomes)
+
+    for index, _ in tqdm(report_df.iterrows(), desc="Processing Data"):
+        row = report_df.loc[index]
+        device, egressInterface = row["lastHopDevice"], row["lastHopEgressIntf"]
+        dstIpLocationType, forwardingOutcome = row["dstIpLocationType"], row["forwardingOutcome"]
+        securityOutcome, dest_status = row["securityOutcome"], row["dest_status"]
+        behaviors, dstIp, aclAction = row["ACLS"], row["dstIp"], row["AclAction"]
+    
+
+        if device and forwardingOutcome and egressInterface and not bool(re.match(r"^self\..*", egressInterface)):
+            host = hosts[(hosts["deviceName"] == device) & (hosts["Interface"] == egressInterface)]
+            hostAddress = ", ".join(
+                    map(
+                        str,
+                        [
+                            address
+                            for address in set(host["Address"].values)
+                            if ipv4_regex.match(address)
+                        ],
+                    )
+                )
+            if not host.empty:
+                ipv4_regex = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+                report_df.at[index, "hostAddress"], report_df.at[index, "MacAddress"], report_df.at[index, "OUI"] = get_host_details(host, ipv4_regex)
+                report_df.at[index, "Disposition"], report_df.at[index, "Violation"] = getDisposition(row, host, egressInterface, dstIpLocationType, securityOutcome, forwardingOutcome, dest_status)
+                logging.info(f"Updated host details for device: {device} and interface: {egressInterface}")
+            else:
+                logging.warning(f"No host details found for device: {device} and interface: {egressInterface}")
+                report_df.at[index, "hostAddress"], report_df.at[index, "MacAddress"], report_df.at[index, "OUI"] = None, None, None
+                report_df.at[index, "Disposition"] = getDisposition(row, host, egressInterface, dstIpLocationType, securityOutcome, forwardingOutcome, dest_status)
+                report_df.at[index, "Diagnostic"] = getDiagnostic(row, host, egressInterface, dstIpLocationType, securityOutcome, forwardingOutcome, dest_status, behaviors, app_df)
+        else:
+            report_df.at[index, "hostAddress"], report_df.at[index, "MacAddress"], report_df.at[index, "OUI"] = None, None, None
+            report_df.at[index, "Disposition"] = getDisposition(row, host, egressInterface, dstIpLocationType, securityOutcome, forwardingOutcome, dest_status)
+            report_df.at[index, "Diagnostic"] = getDiagnostic(row, host, egressInterface, dstIpLocationType, securityOutcome, forwardingOutcome, dest_status, behaviors, app_df)
+            logging.warning(f"No device or interface details found for device: {device} and interface: {egressInterface}")
     return report_df
 
 
@@ -1198,6 +1325,7 @@ def generate_report(snapshot, report_df, with_diag=False):
         "securityOutcome",
         "Violation",
         "Disposition",
+        "Diagnostic",
         "AclAction",
         "srcIpLocationType",
         "dstIpLocationType",
@@ -1211,6 +1339,7 @@ def generate_report(snapshot, report_df, with_diag=False):
         "forwardHops",
         "returnPathCount",
         "returnHops",
+        "ACLS",
     ]
 
     # Excel has a max row limit of 1048576
@@ -1271,7 +1400,7 @@ async def handler(
             print(f"Collection End: {datetime.datetime.now()}")
             logging.info(f"Collection End: {datetime.datetime.now()}")
 
-            report_df = prepare_report(intent, hosts)
+            report_df = prepare_report(intent, hosts, app_df)
 
             addresses = list(
                 set([tuple(x) for x in report_df[["srcIp", "dstIp"]].values.tolist()])
@@ -1512,8 +1641,9 @@ def main():
             print(f"Total rows in intent: {len(intent)}")
 
             hosts = pd.read_csv("./cache/hosts.csv")
+            app_df = pd.read_csv("./cache/acls.csv")
 
-            report_df = prepare_report(intent, hosts)
+            report_df = prepare_report(intent, hosts, app_df)
 
             generate_report(snapshot, report_df, with_diag)
             return
