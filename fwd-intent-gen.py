@@ -128,8 +128,93 @@ securityOutcomes = {
         "remedy": "This error may indicate that the source or destination address could not be found in the model. Check the source and destination address using Forward Enterprise search. The address may be incorrect or the address cannot be located.",
     },
 }
+acl_query2 = """
+acls =
+  foreach device in network.devices
+  foreach aclEntry in device.aclEntries
+  let srcs = aclEntry.headerMatches.ipv4Src
+  let dsts = aclEntry.headerMatches.ipv4Dst
+  let ips = distinct(srcs + dsts)
+  select distinct {
+    sources: srcs,
+    destinations: dsts,
+    ips: ips,
+    protocols: (foreach t in aclEntry.headerMatches.ipProtocol
+                select { start: t.start, end: t.end }),
+    dstports: (foreach p in aclEntry.headerMatches.tpDst
+               select { start: p.start, end: p.end }),
+    name: aclEntry.name
+  };
+
+hosts =
+  foreach d in network.devices
+  foreach hosts in d.hosts
+  foreach host in hosts.addresses
+  select distinct host;
+
+foreach acl in acls
+where length(foreach ip in acl.ips
+             where ip in hosts
+             select 1) >
+      0
+select distinct {
+  application: acl.name,
+  sources: acl.sources,
+  destinations: acl.destinations,
+  protocols: acl.protocols,
+  dstPorts: acl.dstports,
+} 
+"""
 
 acl_query = """
+acls =
+  foreach device in network.devices
+  foreach aclEntry in device.aclEntries
+  let srcs = aclEntry.headerMatches.ipv4Src
+  let dsts = aclEntry.headerMatches.ipv4Dst
+  let ips = distinct(srcs + dsts)
+  select {
+    sources: aclEntry.headerMatches.ipv4Src,
+    destinations: aclEntry.headerMatches.ipv4Dst,
+    ips: ips,
+    action: when aclEntry.action is
+              DENY -> "DENY";
+              PBR -> "PBR";
+              PERMIT -> "PERMIT",
+    protocols: (foreach t in aclEntry.headerMatches.ipProtocol
+                select { start: t.start, end: t.end }),
+    dstports: (foreach p in aclEntry.headerMatches.tpDst
+               select { start: p.start, end: p.end }),
+    name: aclEntry.name
+  };
+
+hosts =
+  foreach d in network.devices
+  foreach hosts in d.hosts
+  foreach host in hosts.addresses
+  select host;
+
+foreach device in network.devices
+let acls = acls
+let hosts = hosts
+foreach acl in acls
+where length(foreach ip in acl.ips
+             where ip in hosts
+             select 1) >
+      0
+select distinct {
+  application: acl.name,
+  sources: acl.sources,
+  destinations: acl.destinations,
+  protocols: acl.protocols,
+  dstPorts: acl.dstports,
+  action: acl.action,
+  hostcount: length(hosts),
+  device: device.name
+}
+"""
+
+acl_query1 = """
 getAcl =
   foreach device in network.devices
   foreach aclEntry in device.aclEntries
