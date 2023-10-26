@@ -38,9 +38,9 @@
 
 """
 Usage:
-  fwd-intent-gen.py from_import <input> <appserver> <snapshot> [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
-  fwd-intent-gen.py from_acls <appserver> <snapshot>   [--batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
-  fwd-intent-gen.py check <input> <appserver> <snapshot> [--csv] [--debug]
+  fwd-intent-gen.py from_import <input> <appserver> <network> [--snapshot=<snapshot> --batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
+  fwd-intent-gen.py from_acls <appserver> <network>   [--snapshot=<snapshot> --batch=<batch_size>] [--limit=<limit>] [--max=<max_query>] [--withdiag] [--debug]
+  fwd-intent-gen.py check <input> <appserver> <network> [--snapshot=<snapshot> --csv] [--debug]
 
 Options:
   -h --help             Show this help message
@@ -49,6 +49,7 @@ Options:
   --debug               "Set Debug Flag [default: False]"
   --limit=<limit>       "Limit to n applications (ACL-names) [default: 1000]
   --max=<max_query>    "Max queries [default: 10000]
+  --snapshot=<snapshot>
 """
 
 import itertools
@@ -377,6 +378,8 @@ def test_communication(appserver):
         sys.exit(1)
 
 
+
+
 def flatten_input(data):
     rows = []
     for region, apps in data.items():
@@ -452,6 +455,19 @@ def resolve_ip_to_domain(ip_address):
 
 # API
 
+def get_latest_snapshot(appserver, network):
+    try:
+        response = requests.get(f"https://{appserver}/api/networks/{network}/snapshots/latestProcessed", auth=(username, password),timeout=10, verify=False)
+        response.raise_for_status()
+        response_json = response.json()
+        if "id" in response_json:
+            return response_json["id"]
+        else:
+            print("Error: 'id' not found in the response.")
+            sys.exit(1)
+    except requests.exceptions.RequestException as e:
+        print(f"HTTP communication failed with {appserver} {e}.")
+        sys.exit(1)
 
 def nqe_get_hosts_from_acl(query, appserver, snapshot):
     url = f"https://{appserver}/api/nqe?snapshotId={snapshot}"
@@ -964,6 +980,8 @@ def search_address(input):
         for a in value
     }
     return addresses
+
+
 
 
 async def nqe_get_hosts_by_port(queryId, appserver, snapshot, device, port):
@@ -1689,7 +1707,8 @@ def main():
     arguments = docopt(__doc__)
     infile = arguments["<input>"]
     appserver = arguments["<appserver>"]
-    snapshot = arguments["<snapshot>"]
+    network = arguments["<network>"]
+    snapshot = arguments["--snapshot"] or get_latest_snapshot(appserver, network)
     batchsize = int(arguments["--batch"])
     limit = int(arguments["--limit"])
     max_query = int(arguments["--max"])
@@ -1744,7 +1763,8 @@ def main():
         print("Running: Check")
         infile = arguments["<input>"]
         appserver = arguments["<appserver>"]
-        snapshot = arguments["<snapshot>"]
+        network = arguments["<network>"]
+        snapshot = arguments["--snapshot"] or get_latest_snapshot(appserver, network)       
         csv = arguments["--csv"]
 
         check(appserver, snapshot, infile, csv)
@@ -1752,7 +1772,8 @@ def main():
     elif arguments["from_acls"]:
         print("Running: from_acls")
         appserver = arguments["<appserver>"]
-        snapshot = arguments["<snapshot>"]
+        network = arguments["<network>"]
+        snapshot = arguments["--snapshot"] or get_latest_snapshot(appserver, network)     
         batchsize = int(arguments["--batch"])
         limit = int(arguments["--limit"])
         max_query = int(arguments["--max"])
